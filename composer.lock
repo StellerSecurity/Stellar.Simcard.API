@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "3edf47f2940f72ca2b2fa46189569d0f",
+    "content-hash": "9614c9c5ec5dadcf810df944195ba9d7",
     "packages": [
         {
             "name": "brick/math",
@@ -3352,6 +3352,47 @@
                 "source": "https://github.com/ramsey/uuid/tree/4.9.1"
             },
             "time": "2025-09-04T20:59:21+00:00"
+        },
+        {
+            "name": "stellarsecurity/laravel-hardening",
+            "version": "v1.0.0",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/StellarSecurity-Packages/stellar-laravel-hardening.git",
+                "reference": "c30351f035751b27fcb004cff894547c137a3424"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/StellarSecurity-Packages/stellar-laravel-hardening/zipball/c30351f035751b27fcb004cff894547c137a3424",
+                "reference": "c30351f035751b27fcb004cff894547c137a3424",
+                "shasum": ""
+            },
+            "require": {
+                "php": "^8.0"
+            },
+            "type": "library",
+            "extra": {
+                "laravel": {
+                    "providers": [
+                        "Stellar\\LaravelHardening\\Providers\\StellarHardeningServiceProvider"
+                    ]
+                }
+            },
+            "autoload": {
+                "psr-4": {
+                    "Stellar\\LaravelHardening\\": "src/"
+                }
+            },
+            "notification-url": "https://packagist.org/downloads/",
+            "license": [
+                "proprietary"
+            ],
+            "description": "Stellar Security hardening guard for Laravel (blocks APP_DEBUG=true on production-like hosts).",
+            "support": {
+                "issues": "https://github.com/StellarSecurity-Packages/stellar-laravel-hardening/issues",
+                "source": "https://github.com/StellarSecurity-Packages/stellar-laravel-hardening/tree/v1.0.0"
+            },
+            "time": "2025-12-10T01:15:46+00:00"
         },
         {
             "name": "symfony/clock",

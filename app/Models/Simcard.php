@@ -10,18 +10,13 @@ class Simcard extends Model
     use HasUuids;
 
     protected $fillable = [
-        'plan_id',
+        'plan_id_hash',
         'provider',
         'package_code',
-        'external_order_id',
-        'iccid',
+        'external_order_id_enc',
+        'iccid_enc',
         'state',
         'user_id',
         'account_ref',
-    ];
-
-    protected $casts = [
-        'external_order_id' => 'encrypted',
-        'iccid'             => 'encrypted',
     ];
 }

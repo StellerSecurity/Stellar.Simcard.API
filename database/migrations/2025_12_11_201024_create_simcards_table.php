@@ -8,22 +8,21 @@ return new class extends Migration {
     public function up(): void
     {
         Schema::create('simcards', function (Blueprint $table) {
-            // Primary key as UUID
             $table->uuid('id')->primary();
 
-            // Public identifier used by APIs / frontend
-            $table->string('plan_id', 32)->unique();
+            // Only the HMAC hash of plan_id is stored. Never the real plan_id.
+            $table->string('plan_id_hash', 64)->unique();
 
-            // Provider info
-            $table->string('provider', 50); // e.g. "esimaccess"
+            // Provider + package metadata
+            $table->string('provider', 50);
             $table->string('package_code', 100);
 
-            // Sensitive fields - will be encrypted at model level
-            $table->text('external_order_id'); // encrypted cast
-            $table->text('iccid')->nullable(); // encrypted cast
+            // Encrypted provider identifiers (AES-256-GCM)
+            $table->text('external_order_id_enc');
+            $table->text('iccid_enc')->nullable();
 
-            // State and meta
-            $table->string('state', 30)->default('pending'); // pending, active, failed, expired
+            // State and ownership
+            $table->string('state', 30)->default('pending');
             $table->unsignedBigInteger('user_id')->nullable();
             $table->string('account_ref', 191)->nullable();
 
