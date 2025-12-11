@@ -18,6 +18,12 @@ return [
         'key' => env('POSTMARK_API_KEY'),
     ],
 
+    'esimaccess' => [
+        'base_url'    => env('ESIMACCESS_BASE_URL', 'https://api.esimaccess.com/api'),
+        'access_code' => env('ESIMACCESS_ACCESS_CODE'),
+        'secret_key'  => env('ESIMACCESS_SECRET_KEY'),
+    ],
+
     'resend' => [
         'key' => env('RESEND_API_KEY'),
     ],
