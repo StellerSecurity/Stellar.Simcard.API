@@ -17,6 +17,10 @@ return Application::configure(basePath: dirname(__DIR__))
             'stellar.sim.basic' => StellarSimApiAuth::class,
         ]);
     })
+    ->withProviders([
+        App\Providers\AppServiceProvider::class,
+        App\Providers\EsimServiceProvider::class,
+    ])
     ->withExceptions(function (Exceptions $exceptions): void {
         //
     })->create();
