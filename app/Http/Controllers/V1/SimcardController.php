@@ -6,7 +6,6 @@ use App\Http\Controllers\Controller;
 use App\Services\SimcardService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Validation\ValidationException;
 
 class SimcardController extends Controller
 {
@@ -33,19 +32,22 @@ class SimcardController extends Controller
             'account_ref' => 'nullable|string|max:191',
         ]);
 
-        $user = $request->user();
+        /*$user = $request->user();
         if (!$user) {
             throw ValidationException::withMessages([
                 'user' => ['User not authenticated.'],
             ]);
-        }
+        }*/
+
+        // userId not needed for now.
 
         $simcard = $this->simcardService->orderEsim(
-            userId: $user->id,
+            userId: 1,
             accountRef: $data['account_ref'] ?? null,
             packageCode: $data['packageCode'],
             planId: $data['plan_id'],
         );
+
 
         return response()->json([
             'response_code' => 201,

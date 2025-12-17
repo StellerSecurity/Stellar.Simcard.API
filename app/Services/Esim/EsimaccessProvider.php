@@ -73,10 +73,14 @@ class EsimaccessProvider implements EsimProvider
 
         $body = $response->json();
 
-        $externalOrderId =
-            $body['data']['orderNo']
-            ?? $body['orderNo']
-            ?? throw new \RuntimeException('No orderNo in provider response');
+        $externalOrderId = data_get($body, 'obj.orderNo')
+            ?? data_get($body, 'data.orderNo')
+            ?? data_get($body, 'orderNo');
+
+        if (!is_string($externalOrderId) || $externalOrderId === '') {
+            throw new \RuntimeException('No orderNo in provider response.');
+        }
+
 
         return new EsimProviderOrder($externalOrderId, $body);
     }

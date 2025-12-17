@@ -3,8 +3,8 @@
 namespace App\Services;
 
 use App\Models\Simcard;
-use App\Services\Esim\EsimCryptoService;
 use App\Services\Esim\EsimProvider;
+use App\Services\Esim\EsimCryptoService;
 use Illuminate\Support\Str;
 
 class SimcardService
@@ -21,12 +21,19 @@ class SimcardService
     }
 
     /** Create eSIM order using a client-side generated plan_id */
-    public function orderEsim(int $userId, ?string $accountRef, string $packageCode, string $planId): Simcard
-    {
+    public function orderEsim(
+        int $userId,
+        ?string $accountRef,
+        string $packageCode,
+        string $planId
+    ): Simcard {
         $planIdHash = $this->crypto->derivePlanHash($planId);
         $order      = $this->provider->createOrder($packageCode);
 
-        $externalOrderIdEnc = $this->crypto->encryptForPlan($planId, $order->externalOrderId);
+        $externalOrderIdEnc = $this->crypto->encryptForPlan(
+            $planId,
+            $order->externalOrderId
+        );
 
         return Simcard::create([
             'id'                    => (string) Str::uuid(),
@@ -35,7 +42,7 @@ class SimcardService
             'package_code'          => $packageCode,
             'external_order_id_enc' => $externalOrderIdEnc,
             'iccid_enc'             => null,
-            'state'                 => 'pending',
+            'state'                 => 'OK',
             'user_id'               => $userId,
             'account_ref'           => $accountRef,
         ]);

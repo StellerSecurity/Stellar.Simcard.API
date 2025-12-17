@@ -9,6 +9,8 @@ class Simcard extends Model
 {
     use HasUuids;
 
+    public $timestamps = false;
+
     protected $fillable = [
         'plan_id_hash',
         'provider',
