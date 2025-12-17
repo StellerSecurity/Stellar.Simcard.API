@@ -96,8 +96,7 @@ class EsimaccessProvider implements EsimProvider
         ];
 
         $response = Http::withHeaders($this->createHeaders($payload))
-            ->post($this->baseUrl . '/v1/open/esim/query', $payload)
-            ->throw();
+            ->post($this->baseUrl . '/v1/open/esim/query', $payload);
 
         return $response->json();
     }

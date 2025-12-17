@@ -63,14 +63,16 @@ class SimcardController extends Controller
 
         return response()->json([
             'response_code' => 200,
-            'data'          => [
+            'data' => [
                 'simcard' => [
                     'state'        => $result['simcard']->state,
                     'provider'     => $result['simcard']->provider,
                     'package_code' => $result['simcard']->package_code,
                 ],
-                'provider_raw' => app()->isProduction() ? null : $result['provider'],
+                // Sanitized provider payload (safe for clients)
+                'provider' => $result['provider'],
             ],
         ]);
+
     }
 }

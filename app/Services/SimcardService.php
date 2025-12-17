@@ -49,6 +49,7 @@ class SimcardService
     }
 
     /** Query provider for usage/status for a given plan_id */
+    /** Query provider for usage/status for a given plan_id */
     public function queryStatusByPlanId(string $planId): array
     {
         $planIdHash = $this->crypto->derivePlanHash($planId);
@@ -60,11 +61,33 @@ class SimcardService
             $simcard->external_order_id_enc
         );
 
-        $providerResult = $this->provider->queryOrder($externalOrderId);
+        $provider = $this->provider->queryOrder($externalOrderId);
+
+        // Extract the first eSIM entry if present.
+        $esim = $provider['obj']['esimList'][0] ?? null;
+
+        // Build a minimal, safe payload for clients.
+        $safeProvider = [
+            'expires_at'      => $esim['expiredTime'] ?? null,
+            'total_bytes'     => $esim['totalVolume'] ?? null,
+            'used_bytes'      => $esim['orderUsage'] ?? null,
+            'remaining_bytes' => (isset($esim['totalVolume'], $esim['orderUsage']) && is_numeric($esim['totalVolume']) && is_numeric($esim['orderUsage']))
+                ? max(0, (int) $esim['totalVolume'] - (int) $esim['orderUsage'])
+                : null,
+
+            // Only include what the app actually needs.
+            'qr_code_url'     => $esim['qrCodeUrl'] ?? null,
+            'short_url'       => $esim['shortUrl'] ?? null,
+
+            'esim_status'     => $esim['esimStatus'] ?? null,
+            'smdp_status'     => $esim['smdpStatus'] ?? null,
+        ];
 
         return [
             'simcard'  => $simcard,
-            'provider' => $providerResult,
+            'provider' => $safeProvider,
         ];
     }
+
+
 }
