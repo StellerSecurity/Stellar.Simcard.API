@@ -3,8 +3,9 @@
 namespace App\Services;
 
 use App\Models\Simcard;
-use App\Services\Esim\EsimProvider;
 use App\Services\Esim\EsimCryptoService;
+use App\Services\Esim\EsimProvider;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 class SimcardService
@@ -20,7 +21,7 @@ class SimcardService
         return $this->provider->listPlans($filters);
     }
 
-    /** Create eSIM order using a client-side generated plan_id */
+    /** Create eSIM order using a client-side generated plan_id (idempotent per plan_id_hash) */
     public function orderEsim(
         int $userId,
         ?string $accountRef,
@@ -28,27 +29,52 @@ class SimcardService
         string $planId
     ): Simcard {
         $planIdHash = $this->crypto->derivePlanHash($planId);
-        $order      = $this->provider->createOrder($packageCode);
 
-        $externalOrderIdEnc = $this->crypto->encryptForPlan(
-            $planId,
-            $order->externalOrderId
-        );
+        return DB::transaction(function () use ($planIdHash, $userId, $accountRef, $packageCode, $planId) {
+            // If a record already exists for this plan_id, do not create a new provider order.
+            $existing = Simcard::where('plan_id_hash', $planIdHash)->first();
+            if ($existing) {
+                return $existing;
+            }
 
-        return Simcard::create([
-            'id'                    => (string) Str::uuid(),
-            'plan_id_hash'          => $planIdHash,
-            'provider'              => 'esimaccess',
-            'package_code'          => $packageCode,
-            'external_order_id_enc' => $externalOrderIdEnc,
-            'iccid_enc'             => null,
-            'state'                 => 'OK',
-            'user_id'               => $userId,
-            'account_ref'           => $accountRef,
-        ]);
+            $order = $this->provider->createOrder($packageCode);
+
+            $externalOrderIdEnc = $this->crypto->encryptForPlan(
+                $planId,
+                $order->externalOrderId
+            );
+
+            return Simcard::create([
+                'id'                    => (string) Str::uuid(),
+                'plan_id_hash'          => $planIdHash,
+                'provider'              => 'esimaccess',
+                'package_code'          => $packageCode,
+                'external_order_id_enc' => $externalOrderIdEnc,
+                'iccid_enc'             => null,
+                'state'                 => 'pending',
+                'user_id'               => $userId,
+                'account_ref'           => $accountRef,
+            ]);
+        });
     }
 
-    /** Query provider for usage/status for a given plan_id */
+    /** Order and return install payload (AC) when available */
+    public function orderAndGetInstallInfo(
+        int $userId,
+        ?string $accountRef,
+        string $packageCode,
+        string $planId
+    ): array {
+        $simcard = $this->orderEsim($userId, $accountRef, $packageCode, $planId);
+
+        $install = $this->fetchInstallInfoWithRetry($planId);
+
+        return [
+            'simcard' => $simcard,
+            'install' => $install,
+        ];
+    }
+
     /** Query provider for usage/status for a given plan_id */
     public function queryStatusByPlanId(string $planId): array
     {
@@ -66,7 +92,7 @@ class SimcardService
         // Extract the first eSIM entry if present.
         $esim = $provider['obj']['esimList'][0] ?? null;
 
-        // Build a minimal, safe payload for clients.
+        // Build a minimal, safe payload for clients (usage/status only).
         $safeProvider = [
             'expires_at'      => $esim['expiredTime'] ?? null,
             'total_bytes'     => $esim['totalVolume'] ?? null,
@@ -74,11 +100,6 @@ class SimcardService
             'remaining_bytes' => (isset($esim['totalVolume'], $esim['orderUsage']) && is_numeric($esim['totalVolume']) && is_numeric($esim['orderUsage']))
                 ? max(0, (int) $esim['totalVolume'] - (int) $esim['orderUsage'])
                 : null,
-
-            // Only include what the app actually needs.
-            'qr_code_url'     => $esim['qrCodeUrl'] ?? null,
-            'short_url'       => $esim['shortUrl'] ?? null,
-
             'esim_status'     => $esim['esimStatus'] ?? null,
             'smdp_status'     => $esim['smdpStatus'] ?? null,
         ];
@@ -89,5 +110,48 @@ class SimcardService
         ];
     }
 
+    /** Fetch install payload (AC) with a short retry loop */
+    private function fetchInstallInfoWithRetry(string $planId): array
+    {
+        $planIdHash = $this->crypto->derivePlanHash($planId);
 
+        $simcard = Simcard::where('plan_id_hash', $planIdHash)->firstOrFail();
+
+        $externalOrderId = $this->crypto->decryptForPlan(
+            $planId,
+            $simcard->external_order_id_enc
+        );
+
+        for ($i = 0; $i < 10; $i++) {
+            $provider = $this->provider->queryOrder($externalOrderId);
+
+            $install = $this->buildInstallPayload($provider);
+
+            // AC is the only thing we need for installation.
+            if (!empty($install['ac'])) {
+                if ($simcard->state !== 'OK') {
+                    $simcard->state = 'OK';
+                    $simcard->save();
+                }
+
+                return $install;
+            }
+
+            usleep(350_000); // 350ms
+        }
+
+        return [
+            'ac' => null,
+        ];
+    }
+
+    /** Build install payload from provider response */
+    private function buildInstallPayload(array $provider): array
+    {
+        $esim = $provider['obj']['esimList'][0] ?? null;
+
+        return [
+            'ac' => $esim['ac'] ?? null,
+        ];
+    }
 }

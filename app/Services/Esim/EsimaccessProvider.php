@@ -17,9 +17,18 @@ class EsimaccessProvider implements EsimProvider
     {
         return new self(
             baseUrl: rtrim(config('services.esimaccess.base_url'), '/'),
-            accessCode: config('services.esimaccess.access_code'),
-            secretKey: config('services.esimaccess.secret_key'),
+            accessCode: (string) config('services.esimaccess.access_code'),
+            secretKey: (string) config('services.esimaccess.secret_key'),
         );
+    }
+
+    /**
+     * Create a shared HTTP client with sane timeouts.
+     */
+    private function http()
+    {
+        return Http::timeout(30)
+            ->connectTimeout(10);
     }
 
     private function createHeaders(array $data): array
@@ -48,7 +57,8 @@ class EsimaccessProvider implements EsimProvider
             'iccid'        => $filters['iccid'] ?? '',
         ];
 
-        $response = Http::withHeaders($this->createHeaders($payload))
+        $response = $this->http()
+            ->withHeaders($this->createHeaders($payload))
             ->post($this->baseUrl . '/v1/open/package/list', $payload)
             ->throw();
 
@@ -67,7 +77,8 @@ class EsimaccessProvider implements EsimProvider
             ]],
         ];
 
-        $response = Http::withHeaders($this->createHeaders($payload))
+        $response = $this->http()
+            ->withHeaders($this->createHeaders($payload))
             ->post($this->baseUrl . '/v1/open/esim/order', $payload)
             ->throw();
 
@@ -80,7 +91,6 @@ class EsimaccessProvider implements EsimProvider
         if (!is_string($externalOrderId) || $externalOrderId === '') {
             throw new \RuntimeException('No orderNo in provider response.');
         }
-
 
         return new EsimProviderOrder($externalOrderId, $body);
     }
@@ -95,8 +105,10 @@ class EsimaccessProvider implements EsimProvider
             ],
         ];
 
-        $response = Http::withHeaders($this->createHeaders($payload))
-            ->post($this->baseUrl . '/v1/open/esim/query', $payload);
+        $response = $this->http()
+            ->withHeaders($this->createHeaders($payload))
+            ->post($this->baseUrl . '/v1/open/esim/query', $payload)
+            ->throw();
 
         return $response->json();
     }
