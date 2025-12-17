@@ -16,9 +16,7 @@ class Simcard extends Model
         'provider',
         'package_code',
         'external_order_id_enc',
-        'iccid_enc',
         'state',
-        'user_id',
-        'account_ref',
+        'user_id'
     ];
 }

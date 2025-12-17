@@ -50,10 +50,8 @@ class SimcardService
                 'provider'              => 'esimaccess',
                 'package_code'          => $packageCode,
                 'external_order_id_enc' => $externalOrderIdEnc,
-                'iccid_enc'             => null,
                 'state'                 => 'pending',
-                'user_id'               => $userId,
-                'account_ref'           => $accountRef,
+                'user_id'               => $userId
             ]);
         });
     }
