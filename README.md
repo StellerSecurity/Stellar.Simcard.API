@@ -21,7 +21,7 @@ This is infrastructure designed to know as little as possible.
 
 ---
 
-### 2. No global secrets for user data
+### 2. No single global secret is sufficient to decrypt user data.
 - There is **no master decrypt-everything key**.
 - Each plan derives its own encryption key from:
     - a secret master key
@@ -50,7 +50,7 @@ Nothing more.
 
 ## Architecture Overview
 
-Client (kiosk / app)
+Client (app)
 |
 |  plan_id (16 digits, user-only)
 v
@@ -71,7 +71,7 @@ API
 
 ### Plan hash (DB lookup)
 - PBKDF2-HMAC-SHA256
-- 300,000 iterations
+- 300,000 iterations (Iteration count is an operational parameter and may be increased as hardware capacity allows.)
 - Keyed with a secret hash key
 - Versioned (`v1:` prefix)
 
