@@ -19,10 +19,6 @@ This is infrastructure designed to know as little as possible.
 - All database lookups use a **slow, keyed, non-reversible hash**.
 - Sensitive provider data is encrypted **per plan**, not globally.
 
-If the database leaks, the data is useless.
-If an admin is compromised, the data is useless.
-If we are compelled to disclose data, we still cannot see it.
-
 ---
 
 ### 2. No global secrets for user data
