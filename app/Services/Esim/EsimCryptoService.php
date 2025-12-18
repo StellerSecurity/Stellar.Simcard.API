@@ -12,7 +12,7 @@ class EsimCryptoService
     private const PLAN_HASH_VERSION = 'v1';
 
     // Hardcoded tuning (watch CPU/latency).
-    private const PLAN_HASH_PBKDF2_ITERS = 300_000;
+    private const PLAN_HASH_PBKDF2_ITERS = 800_000;
 
     private string $hashKey;
     private string $masterKey;
