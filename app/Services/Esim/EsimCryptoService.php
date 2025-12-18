@@ -8,11 +8,11 @@ class EsimCryptoService
 {
     private const PLAN_ID_PATTERN = '/^\d{16}$/';
 
-    // Bump this if you ever change the plan hash algorithm/params.
+    // Keep v1.
     private const PLAN_HASH_VERSION = 'v1';
 
-    // Tuning: increase over time (watch CPU). Start here and measure.
-    private const PLAN_HASH_PBKDF2_ITERS = 200_000;
+    // Hardcoded tuning (watch CPU/latency).
+    private const PLAN_HASH_PBKDF2_ITERS = 300_000;
 
     private string $hashKey;
     private string $masterKey;
@@ -37,8 +37,6 @@ class EsimCryptoService
     {
         $planId = $this->normalizeAndValidatePlanId($planId);
 
-        // PBKDF2 with a secret key acts like a keyed slow hash (peppered KDF).
-        // Output is hex for easy DB storage.
         $hex = hash_pbkdf2(
             algo: 'sha256',
             password: $planId,
@@ -78,7 +76,6 @@ class EsimCryptoService
             throw new RuntimeException('Failed to encrypt value.');
         }
 
-        // Store iv + tag + ciphertext together as base64.
         return base64_encode($iv . $tag . $ciphertext);
     }
 
@@ -121,7 +118,6 @@ class EsimCryptoService
      */
     private function derivePlanKey(string $planId): string
     {
-        // Returns raw bytes (32 bytes) suitable for AES-256-GCM key.
         return hash_hmac('sha256', $planId, $this->masterKey, true);
     }
 
@@ -130,7 +126,6 @@ class EsimCryptoService
      */
     private function normalizeAndValidatePlanId(string $planId): string
     {
-        // If clients ever send spaced versions, normalize here safely.
         $planId = preg_replace('/\s+/', '', $planId) ?? $planId;
 
         if (!preg_match(self::PLAN_ID_PATTERN, $planId)) {
