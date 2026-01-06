@@ -20,5 +20,10 @@ class Simcard extends Model
         'state',
         'user_id',
         'account_ref',
+        'purchased_on'
+    ];
+
+    protected $casts = [
+        'purchased_on' => 'date:Y-m-d',
     ];
 }

@@ -54,6 +54,7 @@ class SimcardService
                 'state'                 => 'pending',
                 'user_id'               => $userId,
                 'account_ref'           => $accountRef,
+                'purchased_on'          => now('UTC')->toDateString()
             ]);
         });
     }
