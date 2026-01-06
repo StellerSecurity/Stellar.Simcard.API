@@ -12,6 +12,9 @@ class Simcard extends Model
     public $timestamps = false;
 
 
+    protected $casts = [
+        'purchased_on' => 'date:Y-m-d',
+    ];
 
     protected $fillable = [
         'plan_id_hash',
