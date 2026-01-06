@@ -11,19 +11,20 @@ class Simcard extends Model
 
     public $timestamps = false;
 
+
+
     protected $fillable = [
         'plan_id_hash',
         'provider',
         'package_code',
         'external_order_id_enc',
-        'iccid_enc',
         'state',
-        'user_id',
-        'account_ref',
-        'purchased_on'
+        'user_id'
     ];
 
-    protected $casts = [
-        'purchased_on' => 'date:Y-m-d',
+    protected $hidden = [
+        'external_order_id_enc',
+        'plan_id_hash',
     ];
+
 }

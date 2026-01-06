@@ -36,7 +36,10 @@ class EsimaccessProvider implements EsimProvider
         $requestId = (string) Str::uuid();
         $timestamp = (int) floor(microtime(true) * 1000);
 
-        $signStr = $timestamp . $requestId . $this->accessCode . json_encode($data);
+        // IMPORTANT: Make JSON deterministic (avoid weird escaping differences)
+        $json = json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+        $signStr = $timestamp . $requestId . $this->accessCode . $json;
         $sign    = hash_hmac('sha256', $signStr, $this->secretKey);
 
         return [

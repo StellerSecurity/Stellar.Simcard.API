@@ -50,11 +50,8 @@ class SimcardService
                 'provider'              => 'esimaccess',
                 'package_code'          => $packageCode,
                 'external_order_id_enc' => $externalOrderIdEnc,
-                'iccid_enc'             => null,
                 'state'                 => 'pending',
-                'user_id'               => $userId,
-                'account_ref'           => $accountRef,
-                'purchased_on'          => now('UTC')->toDateString()
+                'user_id'               => $userId
             ]);
         });
     }
