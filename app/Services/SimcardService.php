@@ -52,7 +52,7 @@ class SimcardService
                 'external_order_id_enc' => $externalOrderIdEnc,
                 'state'                 => 'pending',
                 'user_id'               => $userId,
-                'purchased_on' => now()->toDateString()
+                'purchased_on'          => now()->toDateString(),
             ]);
         });
     }
