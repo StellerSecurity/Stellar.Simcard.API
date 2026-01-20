@@ -28,6 +28,8 @@ class SimcardService
         string $packageCode,
         string $planId
     ): Simcard {
+
+        $planId = preg_replace('/\s+/', '', (string) $planId);
         $planIdHash = $this->crypto->derivePlanHash($planId);
 
         return DB::transaction(function () use ($planIdHash, $userId, $accountRef, $packageCode, $planId) {
@@ -74,16 +76,22 @@ class SimcardService
     }
 
     /** Query provider for usage/status for a given plan_id */
-    public function queryStatusByPlanId(string $planId): array
+    public function queryStatusByPlanId(string $planId): ?array
     {
+
         $planIdHash = $this->crypto->derivePlanHash($planId);
 
-        $simcard = Simcard::where('plan_id_hash', $planIdHash)->firstOrFail();
+        $simcard = Simcard::where('plan_id_hash', $planIdHash)->first();
+
+        if(!$simcard) {
+            return null;
+        }
 
         $externalOrderId = $this->crypto->decryptForPlan(
             $planId,
             $simcard->external_order_id_enc
         );
+
 
         $provider = $this->provider->queryOrder($externalOrderId);
 

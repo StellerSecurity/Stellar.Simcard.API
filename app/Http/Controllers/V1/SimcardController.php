@@ -60,6 +60,10 @@ class SimcardController extends Controller
 
         $result = $this->simcardService->queryStatusByPlanId($data['plan_id']);
 
+        if($result === null) {
+            return response()->json(['response_code' => 400]);
+        }
+
         return response()->json([
             'response_code' => 200,
             'data' => [

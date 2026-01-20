@@ -12,6 +12,6 @@ Route::prefix('v1/sim')
         // POST /api/v1/sim/order
         Route::post('/order', [SimcardController::class, 'order']);
 
-        // GET /api/v1/sim/query/{planId}
+        // GET /api/v1/sim/query
         Route::post('/query', [SimcardController::class, 'query']);
     });
