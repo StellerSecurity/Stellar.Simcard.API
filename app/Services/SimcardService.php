@@ -53,7 +53,8 @@ class SimcardService
                 'package_code'          => $packageCode,
                 'external_order_id_enc' => $externalOrderIdEnc,
                 'state'                 => 'pending',
-                'user_id'               => $userId
+                'user_id'               => $userId,
+                'purchased_on'          => now()->toDateString(),
             ]);
         });
     }
