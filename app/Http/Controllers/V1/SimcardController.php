@@ -31,8 +31,14 @@ class SimcardController extends Controller
             'packageCode' => ['required', 'string', 'max:64'],
         ]);
 
+        $user_id = 1;
+
+        if($request->input('user_id') !== null) {
+            $user_id = $request->input('user_id');
+        }
+
         $result = $this->simcardService->orderAndGetInstallInfo(
-            userId: 1,
+            userId:  $user_id,
             accountRef: null,
             packageCode: $data['packageCode'],
             planId: $data['plan_id'],
