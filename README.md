@@ -4,6 +4,8 @@ A privacy-first eSIM backend built on a single uncompromising principle:
 
 **If we cannot see it, we cannot leak it.**
 
+Stellar eSim can be purchased at: https://stellarsecurity.com/stellar-esim
+
 This project powers eSIM purchases and provisioning while deliberately preventing the operator from accessing or reconstructing sensitive user data such as SIM identifiers or activation credentials.
 
 This is not a CRM.  
