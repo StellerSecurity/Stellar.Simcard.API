@@ -109,6 +109,7 @@ class SimcardService
                 : null,
             'esim_status'     => $esim['esimStatus'] ?? null,
             'smdp_status'     => $esim['smdpStatus'] ?? null,
+            'esim_tran_no'     => $esim['esimTranNo'] ?? null,
             'location_codes'    => $esim['packageList'][0]['locationCode'] ?? null,
         ];
 
