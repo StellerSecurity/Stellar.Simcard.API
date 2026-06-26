@@ -348,7 +348,7 @@ class EsimaccessWebhookService
     private function smsMessageForWebhook(string $notifyType, array $content, Simcard $simcard, ?string $webhookEventId): ?string
     {
         if ($notifyType === 'ESIM_STATUS' && ($content['esimStatus'] ?? null) === 'IN_USE') {
-            return 'Your Stellar eSIM is now active. Stellar VPN is included for free. Use the login from your order confirmation email or receipt. Download Stellar VPN here: https://stellarvpn.org/download';
+            return 'Stellar eSIM is now active. Stellar VPN is included for free. Use the login from your order confirmation. Get Stellar VPN here: https://stellarvpn.org/download';
         }
 
         if ($notifyType === 'DATA_USAGE') {
