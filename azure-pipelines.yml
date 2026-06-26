@@ -8,7 +8,7 @@ trigger:
 
 variables:
   # Azure Resource Manager connection created during pipeline creation
-  azureSubscription: 'd00c636c-b80f-4a3c-9b05-aa93f33603f3'
+  azureSubscription: '04b37675-5af1-49e3-aaa9-11516e719e9c'
 
   # Web app name
   webAppName: 'StellarSimcardApiProd'
