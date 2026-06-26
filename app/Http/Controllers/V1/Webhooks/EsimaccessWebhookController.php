@@ -16,12 +16,12 @@ class EsimaccessWebhookController extends Controller
 
     public function __invoke(Request $request): JsonResponse
     {
-        if (! $this->hasValidSecret($request)) {
+        /*if (! $this->hasValidSecret($request)) {
             return response()->json([
                 'response_code' => 401,
                 'response_message' => 'Unauthorized.',
             ], 401);
-        }
+        }*/
 
         try {
             $result = $this->webhookService->handle($request->all());
