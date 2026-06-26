@@ -115,4 +115,20 @@ class EsimaccessProvider implements EsimProvider
 
         return $response->json();
     }
+
+
+    public function sendSms(string $iccid, string $message): array
+    {
+        $payload = [
+            'iccid' => $iccid,
+            'message' => $message,
+        ];
+
+        $response = $this->http()
+            ->withHeaders($this->createHeaders($payload))
+            ->post($this->baseUrl . '/v1/open/esim/sendSms', $payload)
+            ->throw();
+
+        return $response->json();
+    }
 }

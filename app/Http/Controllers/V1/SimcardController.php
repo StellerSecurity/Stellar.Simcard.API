@@ -68,6 +68,8 @@ class SimcardController extends Controller
         ], 201);
     }
 
+
+
     public function query(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [

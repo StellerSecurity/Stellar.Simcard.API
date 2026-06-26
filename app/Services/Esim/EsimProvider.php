@@ -9,4 +9,6 @@ interface EsimProvider
     public function createOrder(string $packageCode): EsimProviderOrder;
 
     public function queryOrder(string $externalOrderId): array;
+
+    public function sendSms(string $iccid, string $message): array;
 }

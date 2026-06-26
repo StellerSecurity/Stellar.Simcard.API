@@ -46,12 +46,15 @@ class SimcardService
                 $order->externalOrderId
             );
 
+            $externalOrderIdHash = $this->crypto->deriveExternalOrderHash($order->externalOrderId);
+
             return Simcard::create([
                 'id'                    => (string) Str::uuid(),
                 'plan_id_hash'          => $planIdHash,
                 'provider'              => 'esimaccess',
                 'package_code'          => $packageCode,
-                'external_order_id_enc' => $externalOrderIdEnc,
+                'external_order_id_enc'  => $externalOrderIdEnc,
+                'external_order_id_hash' => $externalOrderIdHash,
                 'state'                 => 'pending',
                 'user_id'               => $userId,
                 'purchased_on'          => now()->toDateString(),
@@ -75,6 +78,7 @@ class SimcardService
             'install' => $install,
         ];
     }
+
 
     /** Query provider for usage/status for a given plan_id */
     public function queryStatusByPlanId(string $planId): ?array

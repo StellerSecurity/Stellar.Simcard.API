@@ -50,6 +50,53 @@ class EsimCryptoService
     }
 
     /**
+     * Derives a stable, non-reversible hash of the provider order number for webhook lookups.
+     */
+    public function deriveExternalOrderHash(string $externalOrderId): string
+    {
+        return $this->deriveSensitiveValueHash($externalOrderId, 'external_order_id');
+    }
+
+    /**
+     * Derives a stable, non-reversible hash of the ICCID for matching/audit without plaintext storage.
+     */
+    public function deriveIccidHash(string $iccid): string
+    {
+        return $this->deriveSensitiveValueHash($iccid, 'iccid');
+    }
+
+    /**
+     * Derives a stable, non-reversible hash of provider transaction identifiers.
+     */
+    public function deriveTransactionHash(string $transactionId): string
+    {
+        return $this->deriveSensitiveValueHash($transactionId, 'transaction_id');
+    }
+
+    /**
+     * Encrypts a plaintext value with a master-key-derived AEAD key.
+     * Use this only when the value must be recoverable for provider operations.
+     */
+    public function encryptSensitiveValue(string $plaintext): string
+    {
+        $plaintext = trim($plaintext);
+
+        if ($plaintext === '') {
+            throw new RuntimeException('Cannot encrypt an empty sensitive value.');
+        }
+
+        return $this->encryptWithKey($this->deriveMasterDataKey(), $plaintext);
+    }
+
+    /**
+     * Decrypts a value encrypted with encryptSensitiveValue().
+     */
+    public function decryptSensitiveValue(string $encodedCiphertext): string
+    {
+        return $this->decryptWithKey($this->deriveMasterDataKey(), $encodedCiphertext);
+    }
+
+    /**
      * Encrypts a plaintext value using a per-plan key derived from the plan_id.
      * Uses AES-256-GCM with 96-bit IV and 16-byte authentication tag.
      */
@@ -57,7 +104,59 @@ class EsimCryptoService
     {
         $planId = $this->normalizeAndValidatePlanId($planId);
 
-        $key = $this->derivePlanKey($planId);
+        return $this->encryptWithKey($this->derivePlanKey($planId), $plaintext);
+    }
+
+    /**
+     * Decrypts a ciphertext using the per-plan key derived from the plan_id.
+     */
+    public function decryptForPlan(string $planId, string $encodedCiphertext): string
+    {
+        $planId = $this->normalizeAndValidatePlanId($planId);
+
+        return $this->decryptWithKey($this->derivePlanKey($planId), $encodedCiphertext);
+    }
+
+    /**
+     * Returns the last four characters of an identifier for support/debug display.
+     */
+    public function last4(?string $value): ?string
+    {
+        $value = $value === null ? null : trim($value);
+
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        return substr($value, -4);
+    }
+
+    private function deriveSensitiveValueHash(string $value, string $purpose): string
+    {
+        $value = trim($value);
+
+        if ($value === '') {
+            throw new RuntimeException('Cannot hash an empty sensitive value.');
+        }
+
+        return self::PLAN_HASH_VERSION . ':' . hash_hmac('sha256', $purpose . ':' . $value, $this->hashKey);
+    }
+
+    private function deriveMasterDataKey(): string
+    {
+        return hash_hmac('sha256', 'recoverable-sensitive-provider-values', $this->masterKey, true);
+    }
+
+    /**
+     * Derives the per-plan data encryption key: DEK = HMAC(K_MASTER, plan_id)
+     */
+    private function derivePlanKey(string $planId): string
+    {
+        return hash_hmac('sha256', $planId, $this->masterKey, true);
+    }
+
+    private function encryptWithKey(string $key, string $plaintext): string
+    {
         $iv  = random_bytes(12); // 96-bit IV
 
         $tag = '';
@@ -79,14 +178,8 @@ class EsimCryptoService
         return base64_encode($iv . $tag . $ciphertext);
     }
 
-    /**
-     * Decrypts a ciphertext using the per-plan key derived from the plan_id.
-     */
-    public function decryptForPlan(string $planId, string $encodedCiphertext): string
+    private function decryptWithKey(string $key, string $encodedCiphertext): string
     {
-        $planId = $this->normalizeAndValidatePlanId($planId);
-
-        $key  = $this->derivePlanKey($planId);
         $data = base64_decode($encodedCiphertext, true);
 
         if ($data === false || strlen($data) < 12 + 16 + 1) {
@@ -111,14 +204,6 @@ class EsimCryptoService
         }
 
         return $plaintext;
-    }
-
-    /**
-     * Derives the per-plan data encryption key: DEK = HMAC(K_MASTER, plan_id)
-     */
-    private function derivePlanKey(string $planId): string
-    {
-        return hash_hmac('sha256', $planId, $this->masterKey, true);
     }
 
     /**

@@ -1,0 +1,440 @@
+<?php
+
+namespace App\Services\Esim;
+
+use App\Models\EsimWebhookEvent;
+use App\Models\Simcard;
+use Illuminate\Support\Arr;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
+use RuntimeException;
+use Throwable;
+
+class EsimaccessWebhookService
+{
+    private const PROVIDER = 'esimaccess';
+
+    private const SUPPORTED_NOTIFY_TYPES = [
+        'ORDER_STATUS',
+        'ESIM_STATUS',
+        'DATA_USAGE',
+        'VALIDITY_USAGE',
+    ];
+
+    private const REDACTED = '[REDACTED]';
+
+    public function __construct(
+        private readonly EsimCryptoService $crypto,
+        private readonly EsimProvider $provider,
+    ) {}
+
+    public function handle(array $payload): array
+    {
+        $normalized = $this->normalizePayload($payload);
+        $content = $normalized['content'];
+        $notifyType = $normalized['notifyType'];
+
+        $externalOrderIdHash = $this->externalOrderIdHash($content);
+        $iccidHash = $this->iccidHash($content);
+        $transactionIdHash = $this->transactionIdHash($content);
+        $idempotencyKey = $this->idempotencyKey($notifyType, $content);
+
+        $result = DB::transaction(function () use (
+            $normalized,
+            $content,
+            $notifyType,
+            $externalOrderIdHash,
+            $iccidHash,
+            $transactionIdHash,
+            $idempotencyKey
+        ) {
+            $event = EsimWebhookEvent::where('idempotency_key', $idempotencyKey)->first();
+
+            if ($event !== null) {
+                return [
+                    'status' => 'duplicate',
+                    'notify_type' => $notifyType,
+                ];
+            }
+
+            $event = EsimWebhookEvent::create([
+                'id' => (string) Str::uuid(),
+                'provider' => self::PROVIDER,
+                'notify_type' => $notifyType,
+                'idempotency_key' => $idempotencyKey,
+                'external_order_id_hash' => $externalOrderIdHash,
+                'transaction_id_hash' => $transactionIdHash,
+                'transaction_id_last4' => $this->crypto->last4($this->nullableString($content['transactionId'] ?? null)),
+                'iccid_hash' => $iccidHash,
+                'iccid_last4' => $this->crypto->last4($this->nullableString($content['iccid'] ?? null)),
+                'status' => 'received',
+                'payload_redacted' => $this->redactPayload($normalized),
+                'received_at' => now(),
+            ]);
+
+            try {
+                $simcard = $this->findSimcard($externalOrderIdHash, $iccidHash);
+
+                if ($simcard === null) {
+                    $event->status = 'ignored';
+                    $event->error_code = 'simcard_not_found';
+                    $event->error_message = 'No matching simcard found for webhook identifiers.';
+                    $event->processed_at = now();
+                    $event->save();
+
+                    return [
+                        'status' => 'ignored',
+                        'notify_type' => $notifyType,
+                        'reason' => 'simcard_not_found',
+                    ];
+                }
+
+                $event->simcard_id = $simcard->id;
+                $applied = $this->applyToSimcard($simcard, $notifyType, $content);
+
+                if (!$applied) {
+                    $event->status = 'ignored';
+                    $event->error_code = 'notify_type_not_mutated';
+                    $event->error_message = 'Webhook type intentionally did not mutate simcard state.';
+                    $event->processed_at = now();
+                    $event->save();
+
+                    return [
+                        'status' => 'ignored',
+                        'notify_type' => $notifyType,
+                        'simcard_id' => $simcard->id,
+                        'reason' => 'notify_type_not_mutated',
+                    ];
+                }
+
+                $event->status = 'processed';
+                $event->processed_at = now();
+                $event->save();
+
+                return [
+                    'status' => 'processed',
+                    'notify_type' => $notifyType,
+                    'simcard_id' => $simcard->id,
+                ];
+            } catch (Throwable $exception) {
+                $event->status = 'failed';
+                $event->error_code = 'processing_exception';
+                $event->error_message = $this->safeExceptionName($exception);
+                $event->processed_at = now();
+                $event->save();
+
+                Log::warning('Failed to process eSIM Access webhook.', [
+                    'notify_type' => $notifyType,
+                    'event_id' => $event->id,
+                    'exception' => $this->safeExceptionName($exception),
+                ]);
+
+                return [
+                    'status' => 'failed',
+                    'notify_type' => $notifyType,
+                ];
+            }
+        });
+
+        if (($result['status'] ?? null) === 'processed') {
+            $sms = $this->sendWebhookSmsIfNeeded($notifyType, $content, $result);
+
+            if ($sms !== null) {
+                $result['sms'] = $sms;
+            }
+        }
+
+        return $result;
+    }
+
+    private function normalizePayload(array $payload): array
+    {
+        $notifyType = $this->nullableString($payload['notifyType'] ?? $payload['notify_type'] ?? null);
+
+        if ($notifyType === null) {
+            throw new RuntimeException('Missing notifyType.');
+        }
+
+        $notifyType = strtoupper($notifyType);
+
+        if (!in_array($notifyType, self::SUPPORTED_NOTIFY_TYPES, true)) {
+            throw new RuntimeException('Unsupported notifyType.');
+        }
+
+        $content = $payload['content'] ?? [];
+
+        if (is_string($content)) {
+            $decoded = json_decode($content, true);
+            $content = is_array($decoded) ? $decoded : [];
+        }
+
+        if (!is_array($content)) {
+            $content = [];
+        }
+
+        return [
+            'notifyType' => $notifyType,
+            'content' => $content,
+        ];
+    }
+
+    private function externalOrderIdHash(array $content): ?string
+    {
+        $orderNo = $this->nullableString($content['orderNo'] ?? null);
+
+        return $orderNo === null ? null : $this->crypto->deriveExternalOrderHash($orderNo);
+    }
+
+    private function iccidHash(array $content): ?string
+    {
+        $iccid = $this->nullableString($content['iccid'] ?? null);
+
+        return $iccid === null ? null : $this->crypto->deriveIccidHash($iccid);
+    }
+
+    private function transactionIdHash(array $content): ?string
+    {
+        $transactionId = $this->nullableString($content['transactionId'] ?? null);
+
+        return $transactionId === null ? null : $this->crypto->deriveTransactionHash($transactionId);
+    }
+
+    private function findSimcard(?string $externalOrderIdHash, ?string $iccidHash): ?Simcard
+    {
+        if ($externalOrderIdHash !== null) {
+            $simcard = Simcard::where('provider', self::PROVIDER)
+                ->where('external_order_id_hash', $externalOrderIdHash)
+                ->first();
+
+            if ($simcard !== null) {
+                return $simcard;
+            }
+        }
+
+        if ($iccidHash !== null) {
+            return Simcard::where('provider', self::PROVIDER)
+                ->where('iccid_hash', $iccidHash)
+                ->first();
+        }
+
+        return null;
+    }
+
+    private function applyToSimcard(Simcard $simcard, string $notifyType, array $content): bool
+    {
+        // ORDER_STATUS is intentionally not mutated here. Existing order-ready flow remains separate.
+        if ($notifyType === 'ORDER_STATUS') {
+            return false;
+        }
+
+        $simcard->last_webhook_at = now();
+        $this->applySensitiveIdentifiers($simcard, $content);
+
+        match ($notifyType) {
+            'ESIM_STATUS' => $this->applyEsimStatus($simcard, $content),
+            'DATA_USAGE' => $this->applyDataUsage($simcard, $content),
+            'VALIDITY_USAGE' => $this->applyValidityUsage($simcard, $content),
+            default => null,
+        };
+
+        $simcard->save();
+
+        return true;
+    }
+
+    private function applySensitiveIdentifiers(Simcard $simcard, array $content): void
+    {
+        $iccid = $this->nullableString($content['iccid'] ?? null);
+
+        if ($iccid === null) {
+            return;
+        }
+
+        $simcard->iccid_enc = $this->crypto->encryptSensitiveValue($iccid);
+        $simcard->iccid_hash = $this->crypto->deriveIccidHash($iccid);
+        $simcard->iccid_last4 = $this->crypto->last4($iccid);
+    }
+
+    private function applyEsimStatus(Simcard $simcard, array $content): void
+    {
+        $esimStatus = $this->nullableString($content['esimStatus'] ?? null);
+        $smdpStatus = $this->nullableString($content['smdpStatus'] ?? null);
+
+        if ($esimStatus !== null) {
+            $simcard->esim_status = $esimStatus;
+        }
+
+        if ($smdpStatus !== null) {
+            $simcard->smdp_status = $smdpStatus;
+        }
+
+        if ($esimStatus === 'IN_USE') {
+            $simcard->state = 'active';
+            $simcard->activated_at = $simcard->activated_at ?? now();
+        }
+    }
+
+    private function applyDataUsage(Simcard $simcard, array $content): void
+    {
+        $simcard->data_status = 'low';
+        $simcard->total_volume = $this->nullableInt($content['totalVolume'] ?? null);
+        $simcard->order_usage = $this->nullableInt($content['orderUsage'] ?? null);
+        $simcard->remaining_volume = $this->nullableInt($content['remain'] ?? null);
+    }
+
+    private function applyValidityUsage(Simcard $simcard, array $content): void
+    {
+        $simcard->validity_status = 'expiring';
+        $simcard->remaining_validity = $this->nullableInt($content['remain'] ?? null);
+
+        $expiredTime = $this->nullableString($content['expiredTime'] ?? null);
+        if ($expiredTime !== null) {
+            $simcard->expires_at = Carbon::parse($expiredTime);
+        }
+    }
+
+    private function sendWebhookSmsIfNeeded(string $notifyType, array $content, array $result): ?array
+    {
+        $message = $this->smsMessageForWebhook($notifyType, $content);
+
+        if ($message === null) {
+            return null;
+        }
+
+        $iccid = $this->nullableString($content['iccid'] ?? null);
+
+        if ($iccid === null) {
+            return [
+                'status' => 'skipped',
+                'reason' => 'missing_iccid',
+            ];
+        }
+
+        try {
+            $this->provider->sendSms($iccid, $message);
+
+            return [
+                'status' => 'sent',
+            ];
+        } catch (Throwable $exception) {
+            Log::warning('Failed to send eSIM Access webhook SMS.', [
+                'notify_type' => $notifyType,
+                'simcard_id' => $result['simcard_id'] ?? null,
+                'exception' => $this->safeExceptionName($exception),
+            ]);
+
+            return [
+                'status' => 'failed',
+                'reason' => 'provider_sms_failed',
+            ];
+        }
+    }
+
+    private function smsMessageForWebhook(string $notifyType, array $content): ?string
+    {
+        if ($notifyType === 'ESIM_STATUS' && ($content['esimStatus'] ?? null) === 'IN_USE') {
+            return 'Your Stellar eSIM is now active. You can track data and validity in the Stellar app.';
+        }
+
+        if ($notifyType === 'DATA_USAGE') {
+            return 'Your Stellar eSIM is almost out of data. Top up now to stay connected.';
+        }
+
+        if ($notifyType === 'VALIDITY_USAGE') {
+            return 'Your Stellar eSIM expires soon. Extend or buy another plan to stay connected.';
+        }
+
+        return null;
+    }
+
+    private function idempotencyKey(string $notifyType, array $content): string
+    {
+        $parts = [
+            self::PROVIDER,
+            $notifyType,
+            Arr::get($content, 'orderNo'),
+            Arr::get($content, 'transactionId'),
+            Arr::get($content, 'iccid'),
+            Arr::get($content, 'orderStatus'),
+            Arr::get($content, 'esimStatus'),
+            Arr::get($content, 'smdpStatus'),
+            Arr::get($content, 'remain'),
+            Arr::get($content, 'expiredTime'),
+        ];
+
+        return hash_hmac('sha256', implode('|', array_map(
+            static fn ($value) => is_scalar($value) ? (string) $value : json_encode($value),
+            $parts
+        )), (string) config('esim.crypto.hash_key'));
+    }
+
+    private function redactPayload(array $payload): array
+    {
+        return $this->redactArray($payload);
+    }
+
+    private function redactArray(array $value): array
+    {
+        $redacted = [];
+
+        foreach ($value as $key => $item) {
+            if ($this->isSensitivePayloadKey((string) $key)) {
+                $redacted[$key] = self::REDACTED;
+                continue;
+            }
+
+            $redacted[$key] = is_array($item) ? $this->redactArray($item) : $item;
+        }
+
+        return $redacted;
+    }
+
+    private function isSensitivePayloadKey(string $key): bool
+    {
+        $normalized = strtolower(str_replace(['-', '_'], '', $key));
+
+        return in_array($normalized, [
+            'iccid',
+            'orderno',
+            'transactionid',
+            'imsi',
+            'eid',
+            'msisdn',
+            'phone',
+            'phonenumber',
+            'email',
+            'accesscode',
+            'secretkey',
+            'signature',
+            'token',
+            'authorization',
+        ], true);
+    }
+
+    private function safeExceptionName(Throwable $exception): string
+    {
+        return substr(basename(str_replace('\\', '/', get_class($exception))), 0, 255);
+    }
+
+    private function nullableString(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $value = trim((string) $value);
+
+        return $value === '' ? null : $value;
+    }
+
+    private function nullableInt(mixed $value): ?int
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        return is_numeric($value) ? max(0, (int) $value) : null;
+    }
+}

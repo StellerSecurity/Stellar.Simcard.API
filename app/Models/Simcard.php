@@ -11,9 +11,11 @@ class Simcard extends Model
 
     public $timestamps = false;
 
-
     protected $casts = [
         'purchased_on' => 'date:Y-m-d',
+        'expires_at' => 'datetime',
+        'activated_at' => 'datetime',
+        'last_webhook_at' => 'datetime',
     ];
 
     protected $fillable = [
@@ -21,14 +23,31 @@ class Simcard extends Model
         'provider',
         'package_code',
         'external_order_id_enc',
+        'external_order_id_hash',
+        'iccid_enc',
+        'iccid_hash',
+        'iccid_last4',
         'state',
+        'esim_status',
+        'smdp_status',
+        'data_status',
+        'validity_status',
+        'total_volume',
+        'order_usage',
+        'remaining_volume',
+        'remaining_validity',
+        'expires_at',
+        'activated_at',
+        'last_webhook_at',
         'user_id',
         'purchased_on'
     ];
 
     protected $hidden = [
         'external_order_id_enc',
+        'external_order_id_hash',
+        'iccid_enc',
+        'iccid_hash',
         'plan_id_hash',
     ];
-
 }

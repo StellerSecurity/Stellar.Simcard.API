@@ -22,6 +22,7 @@ return [
         'base_url'    => env('ESIMACCESS_BASE_URL', 'https://api.esimaccess.com/api'),
         'access_code' => env('ESIMACCESS_ACCESS_CODE'),
         'secret_key'  => env('ESIMACCESS_SECRET_KEY'),
+        'webhook_secret' => env('ESIMACCESS_WEBHOOK_SECRET'),
     ],
 
     'resend' => [
