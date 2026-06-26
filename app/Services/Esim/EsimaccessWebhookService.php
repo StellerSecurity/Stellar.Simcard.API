@@ -4,6 +4,7 @@ namespace App\Services\Esim;
 
 use App\Models\EsimWebhookEvent;
 use App\Models\Simcard;
+use App\Services\SimcardActionLinkService;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -28,6 +29,7 @@ class EsimaccessWebhookService
     public function __construct(
         private readonly EsimCryptoService $crypto,
         private readonly EsimProvider $provider,
+        private readonly SimcardActionLinkService $actionLinks,
     ) {}
 
     public function handle(array $payload): array
@@ -117,6 +119,7 @@ class EsimaccessWebhookService
                     'status' => 'processed',
                     'notify_type' => $notifyType,
                     'simcard_id' => $simcard->id,
+                    'webhook_event_id' => $event->id,
                 ];
             } catch (Throwable $exception) {
                 $event->status = 'failed';
@@ -297,12 +300,6 @@ class EsimaccessWebhookService
 
     private function sendWebhookSmsIfNeeded(string $notifyType, array $content, array $result): ?array
     {
-        $message = $this->smsMessageForWebhook($notifyType, $content);
-
-        if ($message === null) {
-            return null;
-        }
-
         $iccid = $this->nullableString($content['iccid'] ?? null);
 
         if ($iccid === null) {
@@ -310,6 +307,22 @@ class EsimaccessWebhookService
                 'status' => 'skipped',
                 'reason' => 'missing_iccid',
             ];
+        }
+
+        $simcardId = $this->nullableString($result['simcard_id'] ?? null);
+        $simcard = $simcardId === null ? null : Simcard::find($simcardId);
+
+        if ($simcard === null) {
+            return [
+                'status' => 'skipped',
+                'reason' => 'missing_simcard',
+            ];
+        }
+
+        $message = $this->smsMessageForWebhook($notifyType, $content, $simcard, $this->nullableString($result['webhook_event_id'] ?? null));
+
+        if ($message === null) {
+            return null;
         }
 
         try {
@@ -321,7 +334,7 @@ class EsimaccessWebhookService
         } catch (Throwable $exception) {
             Log::warning('Failed to send eSIM Access webhook SMS.', [
                 'notify_type' => $notifyType,
-                'simcard_id' => $result['simcard_id'] ?? null,
+                'simcard_id' => $simcard->id,
                 'exception' => $this->safeExceptionName($exception),
             ]);
 
@@ -332,18 +345,22 @@ class EsimaccessWebhookService
         }
     }
 
-    private function smsMessageForWebhook(string $notifyType, array $content): ?string
+    private function smsMessageForWebhook(string $notifyType, array $content, Simcard $simcard, ?string $webhookEventId): ?string
     {
         if ($notifyType === 'ESIM_STATUS' && ($content['esimStatus'] ?? null) === 'IN_USE') {
             return 'Your Stellar eSIM is now active. You can track data and validity in the Stellar app.';
         }
 
         if ($notifyType === 'DATA_USAGE') {
-            return 'Your Stellar eSIM is almost out of data. Top up now to stay connected.';
+            $url = $this->actionLinks->createTopupUrl($simcard, 'data_low', $webhookEventId);
+
+            return 'Your Stellar eSIM is almost out of data. Top up here: ' . $url;
         }
 
         if ($notifyType === 'VALIDITY_USAGE') {
-            return 'Your Stellar eSIM expires soon. Extend or buy another plan to stay connected.';
+            $url = $this->actionLinks->createTopupUrl($simcard, 'validity_expiring', $webhookEventId);
+
+            return 'Your Stellar eSIM expires soon. Extend or buy another plan here: ' . $url;
         }
 
         return null;

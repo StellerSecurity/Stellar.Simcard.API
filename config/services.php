@@ -25,6 +25,10 @@ return [
         'webhook_secret' => env('ESIMACCESS_WEBHOOK_SECRET'),
     ],
 
+    'stellar_data' => [
+        'topup_url' => env('STELLAR_DATA_TOPUP_URL', 'https://data.stellarsecurity.com/topup'),
+    ],
+
     'resend' => [
         'key' => env('RESEND_API_KEY'),
     ],

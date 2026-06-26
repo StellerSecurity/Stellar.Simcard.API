@@ -74,6 +74,15 @@ class EsimCryptoService
     }
 
     /**
+     * Derives a stable, non-reversible hash for one-time action-link tokens.
+     * The raw token must never be stored.
+     */
+    public function deriveActionLinkTokenHash(string $token): string
+    {
+        return $this->deriveSensitiveValueHash($token, 'simcard_action_link_token');
+    }
+
+    /**
      * Encrypts a plaintext value with a master-key-derived AEAD key.
      * Use this only when the value must be recoverable for provider operations.
      */
