@@ -100,8 +100,14 @@ class EsimaccessProvider implements EsimProvider
 
     public function queryOrder(string $externalOrderId): array
     {
+        return $this->queryEsim($externalOrderId);
+    }
+
+    public function queryEsim(?string $externalOrderId = null, ?string $iccid = null): array
+    {
         $payload = [
-            'orderNo' => $externalOrderId,
+            'orderNo' => $externalOrderId ?? '',
+            'iccid' => $iccid ?? '',
             'pager'   => [
                 'pageNum'  => 1,
                 'pageSize' => 20,

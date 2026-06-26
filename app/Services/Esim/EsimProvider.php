@@ -10,5 +10,11 @@ interface EsimProvider
 
     public function queryOrder(string $externalOrderId): array;
 
+    /**
+     * Query eSIM details by provider order number or ICCID.
+     * Callers must sanitize/redact the provider response before logging or storing it.
+     */
+    public function queryEsim(?string $externalOrderId = null, ?string $iccid = null): array;
+
     public function sendSms(string $iccid, string $message): array;
 }

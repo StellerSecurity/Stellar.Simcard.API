@@ -353,17 +353,91 @@ class EsimaccessWebhookService
 
         if ($notifyType === 'DATA_USAGE') {
             $url = $this->actionLinks->createTopupUrl($simcard, 'data_low', $webhookEventId);
+            $planPhrase = $this->safePlanPhraseForSms($content);
 
-            return 'Your Stellar eSIM is almost out of data. Top up here: ' . $url;
+            return 'Your Stellar eSIM' . $planPhrase . ' is almost out of data. Top up here: ' . $url;
         }
 
         if ($notifyType === 'VALIDITY_USAGE') {
             $url = $this->actionLinks->createTopupUrl($simcard, 'validity_expiring', $webhookEventId);
+            $planPhrase = $this->safePlanPhraseForSms($content);
 
-            return 'Your Stellar eSIM expires soon. Extend or buy another plan here: ' . $url;
+            return 'Your Stellar eSIM' . $planPhrase . ' expires soon. Extend or buy another plan here: ' . $url;
         }
 
         return null;
+    }
+
+    private function safePlanPhraseForSms(array $content): string
+    {
+        $label = $this->resolveSafePackageLabelForSms($content);
+
+        return $label === null ? '' : ' for ' . $label;
+    }
+
+    private function resolveSafePackageLabelForSms(array $content): ?string
+    {
+        $orderNo = $this->nullableString($content['orderNo'] ?? null);
+        $iccid = $this->nullableString($content['iccid'] ?? null);
+
+        if ($orderNo === null && $iccid === null) {
+            return null;
+        }
+
+        try {
+            $response = $this->provider->queryEsim($orderNo, $iccid);
+            $candidate = $this->extractPackageLabelFromProviderResponse($response);
+
+            return $this->sanitizePackageLabelForSms($candidate);
+        } catch (Throwable $exception) {
+            Log::info('Could not resolve safe eSIM package label for webhook SMS.', [
+                'exception' => $this->safeExceptionName($exception),
+            ]);
+
+            return null;
+        }
+    }
+
+    private function extractPackageLabelFromProviderResponse(array $response): ?string
+    {
+        $esim = Arr::get($response, 'obj.esimList.0');
+
+        if (!is_array($esim)) {
+            return null;
+        }
+
+        $package = Arr::get($esim, 'packageList.0');
+
+        if (!is_array($package)) {
+            return null;
+        }
+
+        foreach (['packageName', 'name', 'slug', 'locationCode'] as $key) {
+            $value = $this->nullableString($package[$key] ?? null);
+
+            if ($value !== null) {
+                return $value;
+            }
+        }
+
+        return null;
+    }
+
+    private function sanitizePackageLabelForSms(?string $label): ?string
+    {
+        if ($label === null) {
+            return null;
+        }
+
+        $label = preg_replace('/[^\p{L}\p{N} .,+\-\/()]/u', '', $label) ?? '';
+        $label = preg_replace('/\s+/u', ' ', $label) ?? '';
+        $label = trim($label);
+
+        if ($label === '') {
+            return null;
+        }
+
+        return Str::limit($label, 60, '');
     }
 
     private function idempotencyKey(string $notifyType, array $content): string
