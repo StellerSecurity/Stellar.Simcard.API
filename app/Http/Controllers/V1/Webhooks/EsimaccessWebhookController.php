@@ -16,12 +16,12 @@ class EsimaccessWebhookController extends Controller
 
     public function __invoke(Request $request): JsonResponse
     {
-        /*if (! $this->hasValidSecret($request)) {
+        if (! $this->isHealthCheck($request) && ! $this->hasValidSecret($request)) {
             return response()->json([
                 'response_code' => 401,
                 'response_message' => 'Unauthorized.',
             ], 401);
-        }*/
+        }
 
         try {
             $result = $this->webhookService->handle($request->all());
@@ -36,6 +36,14 @@ class EsimaccessWebhookController extends Controller
             'response_code' => 200,
             'data' => $result,
         ], 200);
+    }
+
+
+    private function isHealthCheck(Request $request): bool
+    {
+        $notifyType = (string) ($request->input('notifyType') ?? $request->input('notify_type') ?? '');
+
+        return strtoupper(trim($notifyType)) === 'CHECK_HEALTH';
     }
 
     private function hasValidSecret(Request $request): bool

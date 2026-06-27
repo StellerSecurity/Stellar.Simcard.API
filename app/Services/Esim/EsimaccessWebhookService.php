@@ -22,6 +22,8 @@ class EsimaccessWebhookService
         'ESIM_STATUS',
         'DATA_USAGE',
         'VALIDITY_USAGE',
+        'CHECK_HEALTH',
+        'SMDP_EVENT',
     ];
 
     private const REDACTED = '[REDACTED]';
@@ -42,6 +44,10 @@ class EsimaccessWebhookService
         $iccidHash = $this->iccidHash($content);
         $transactionIdHash = $this->transactionIdHash($content);
         $idempotencyKey = $this->idempotencyKey($notifyType, $content);
+
+        if ($notifyType === 'CHECK_HEALTH') {
+            return $this->handleHealthCheck($normalized, $idempotencyKey);
+        }
 
         $result = DB::transaction(function () use (
             $normalized,
@@ -152,6 +158,34 @@ class EsimaccessWebhookService
         return $result;
     }
 
+    private function handleHealthCheck(array $normalized, string $idempotencyKey): array
+    {
+        DB::transaction(function () use ($normalized, $idempotencyKey) {
+            $event = EsimWebhookEvent::where('idempotency_key', $idempotencyKey)->first();
+
+            if ($event !== null) {
+                return;
+            }
+
+            EsimWebhookEvent::create([
+                'id' => (string) Str::uuid(),
+                'provider' => self::PROVIDER,
+                'notify_type' => 'CHECK_HEALTH',
+                'idempotency_key' => $idempotencyKey,
+                'status' => 'processed',
+                'payload_redacted' => $this->redactPayload($normalized),
+                'received_at' => now(),
+                'processed_at' => now(),
+            ]);
+        });
+
+        return [
+            'status' => 'processed',
+            'notify_type' => 'CHECK_HEALTH',
+            'health' => 'ok',
+        ];
+    }
+
     private function normalizePayload(array $payload): array
     {
         $notifyType = $this->nullableString($payload['notifyType'] ?? $payload['notify_type'] ?? null);
@@ -228,7 +262,8 @@ class EsimaccessWebhookService
     private function applyToSimcard(Simcard $simcard, string $notifyType, array $content): bool
     {
         // ORDER_STATUS is intentionally not mutated here. Existing order-ready flow remains separate.
-        if ($notifyType === 'ORDER_STATUS') {
+        // SMDP_EVENT is accepted defensively but does not currently drive business logic.
+        if (in_array($notifyType, ['ORDER_STATUS', 'SMDP_EVENT'], true)) {
             return false;
         }
 
