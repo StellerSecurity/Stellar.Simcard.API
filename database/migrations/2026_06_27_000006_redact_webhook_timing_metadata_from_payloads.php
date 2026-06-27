@@ -8,8 +8,9 @@ return new class extends Migration
     private const REDACTED = '[REDACTED]';
 
     /**
-     * Redact provider transaction aliases that were previously kept in already-redacted
-     * webhook audit payloads. Intentionally one-way: we never restore sensitive values.
+     * Redact provider-supplied timing/correlation metadata from already-redacted
+     * webhook audit payloads. We keep received_at/processed_at as our audit timing.
+     * Intentionally one-way: we never restore sensitive metadata values.
      */
     public function up(): void
     {
@@ -38,7 +39,7 @@ return new class extends Migration
 
     public function down(): void
     {
-        // Irreversible by design. Sensitive provider transaction values are not restored.
+        // Irreversible by design. Provider timing/correlation metadata is not restored.
     }
 
     private function decodePayload(mixed $payload): array
@@ -77,32 +78,10 @@ return new class extends Migration
         $normalized = strtolower(str_replace(['-', '_'], '', $key));
 
         return in_array($normalized, [
-            'iccid',
-            'orderno',
-            'transactionid',
-            'esimtranno',
-            'esimtransactionno',
-            'tranno',
-            'transactionno',
             'timestamp',
             'eventtimestamp',
             'seqnumber',
             'sequencenumber',
-            'imsi',
-            'eid',
-            'msisdn',
-            'phone',
-            'phonenumber',
-            'email',
-            'accesscode',
-            'secretkey',
-            'signature',
-            'token',
-            'authorization',
-            'activationcode',
-            'qrcode',
-            'matchingid',
-            'smdpaddress',
         ], true);
     }
 };
