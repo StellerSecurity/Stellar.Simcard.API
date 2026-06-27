@@ -16,11 +16,11 @@ class EsimaccessWebhookController extends Controller
 
     public function __invoke(Request $request): JsonResponse
     {
-        if (! $this->isHealthCheck($request)) {
+        if ($this->isHealthCheck($request)) {
             return response()->json([
-                'response_code' => 401,
-                'response_message' => 'Unauthorized.',
-            ], 401);
+                'response_code' => 200,
+                'data' => 'OK',
+            ], 200);
         }
 
         try {

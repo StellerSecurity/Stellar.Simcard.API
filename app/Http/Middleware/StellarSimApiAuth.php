@@ -24,7 +24,7 @@ class StellarSimApiAuth
             return response()
                 ->json([
                     'response_code'    => 401,
-                    'response_message' => 'Unauthorized.',
+                    'response_message' => 'Unauthorized Sim API basic.',
                 ], 401, [
                     'WWW-Authenticate' => 'Basic realm="Stellar Sim API"',
                 ]);
