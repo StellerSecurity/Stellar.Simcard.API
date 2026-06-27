@@ -105,7 +105,7 @@ class EsimaccessWebhookService
                 if (!$applied) {
                     $event->status = 'ignored';
                     $event->error_code = 'notify_type_not_mutated';
-                    $event->error_message = 'Webhook type intentionally did not mutate simcard state.';
+                    $event->error_message = 'Webhook type intentionally did not mutate simcard state, type: ' . $notifyType;
                     $event->processed_at = now();
                     $event->save();
 
