@@ -32,6 +32,7 @@ class TopupService
     public function resolve(string $token): array
     {
         [$link, $simcard, $iccid] = $this->resolveValidLink($token);
+
         $providerPlans = $this->provider->listPlans(['iccid' => $iccid]);
         $allPlans = $this->normalizeTopupPlans($providerPlans);
         $currentPlan = $this->findPlanByPackageCode($allPlans, (string) $simcard->package_code);
@@ -327,6 +328,7 @@ class TopupService
     private function normalizeUuid(string $value, string $message): string
     {
         $value = trim($value);
+
         if ($value === '' || ! Str::isUuid($value)) {
             throw new RuntimeException($message, 422);
         }
@@ -411,7 +413,7 @@ class TopupService
             $volumeBytes = $this->intFromKeys($package, ['volume', 'totalVolume', 'dataVolume', 'data', 'amount']);
             $durationDays = $this->intFromKeys($package, ['duration', 'durationDay', 'duration_days', 'validity', 'validityDays', 'validity_days', 'days']);
             $priceCents = $this->priceCentsFromPackage($package);
-            $currency = $this->stringFromKeys($package, ['currency', 'priceCurrency', 'price_currency']) ?? 'EUR';
+            $currency = $this->stringFromKeys($package, ['currency', 'currencyCode', 'priceCurrency', 'price_currency']) ?? 'EUR';
             $locationCode = $this->stringFromKeys($package, ['locationCode', 'location_code']);
             $location = $this->stringFromKeys($package, ['location']);
             $locationName = $this->stringFromKeys($package, ['locationName', 'locationNetworkList.0.locationName']);
@@ -464,7 +466,6 @@ class TopupService
         return [];
     }
 
-
     private function filterPlansForCurrentPackage(array $plans, ?array $currentPlan): array
     {
         if ($currentPlan === null) {
@@ -479,6 +480,7 @@ class TopupService
         }
 
         $filtered = [];
+
         foreach ($plans as $plan) {
             $planLocationCode = $this->planLocationCode($plan);
             $planLocation = $this->normalizeLocationList($plan);
@@ -524,12 +526,14 @@ class TopupService
         }
 
         $code = $this->planLocationCode($plan);
+
         return $code ?: null;
     }
 
     private function normalizeLocationList(array $plan): array
     {
         $location = $this->stringFromKeys($plan, ['location', 'raw.location']);
+
         if ($location === null) {
             $location = $this->planLocationCode($plan);
         }
@@ -544,6 +548,7 @@ class TopupService
         ));
 
         sort($parts);
+
         return array_values(array_unique($parts));
     }
 
@@ -551,6 +556,7 @@ class TopupService
     {
         foreach ($plans as $plan) {
             $candidate = (string) ($plan['package_code'] ?? $plan['code'] ?? $plan['sku'] ?? '');
+
             if ($candidate === $packageCode) {
                 return $plan;
             }
@@ -570,6 +576,7 @@ class TopupService
     {
         foreach (['obj.orderNo', 'data.orderNo', 'orderNo', 'obj.transactionId', 'data.transactionId', 'transactionId'] as $key) {
             $value = Arr::get($payload, $key);
+
             if (is_string($value) && trim($value) !== '') {
                 return trim($value);
             }
@@ -581,8 +588,10 @@ class TopupService
     private function redactProviderPayload(array $payload): array
     {
         $redacted = [];
+
         foreach ($payload as $key => $value) {
             $normalized = strtolower(str_replace(['-', '_'], '', (string) $key));
+
             if (in_array($normalized, ['iccid', 'imsi', 'eid', 'msisdn', 'phone', 'phonenumber', 'activationcode', 'qrcode', 'matchingid', 'smdpaddress', 'token', 'secretkey', 'signature'], true)) {
                 $redacted[$key] = '[REDACTED]';
                 continue;
@@ -598,6 +607,7 @@ class TopupService
     {
         foreach ($keys as $key) {
             $value = Arr::get($data, $key);
+
             if ($value !== null && trim((string) $value) !== '') {
                 return trim((string) $value);
             }
@@ -610,6 +620,7 @@ class TopupService
     {
         foreach ($keys as $key) {
             $value = Arr::get($data, $key);
+
             if ($value !== null && $value !== '' && is_numeric($value)) {
                 return max(0, (int) $value);
             }
@@ -627,8 +638,9 @@ class TopupService
 
         foreach (['price', 'unitPrice', 'unit_price', 'amount'] as $key) {
             $value = Arr::get($package, $key);
+
             if ($value !== null && $value !== '' && is_numeric($value)) {
-                return max(0, (int) round(((float) $value) * 100));
+                return max(0, (int) round(((float) $value) / 10));
             }
         }
 
