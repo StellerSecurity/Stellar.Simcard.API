@@ -22,11 +22,19 @@ return [
         'base_url'    => env('ESIMACCESS_BASE_URL', 'https://api.esimaccess.com/api'),
         'access_code' => env('ESIMACCESS_ACCESS_CODE'),
         'secret_key'  => env('ESIMACCESS_SECRET_KEY'),
+        'topup_path'  => env('ESIMACCESS_TOPUP_PATH', '/v1/open/esim/order'),
         'webhook_secret' => env('ESIMACCESS_WEBHOOK_SECRET'),
     ],
 
     'stellar_data' => [
         'topup_url' => env('STELLAR_DATA_TOPUP_URL', 'https://data.stellarsecurity.com/topup'),
+        'topup_checkout_url' => env('STELLAR_DATA_TOPUP_CHECKOUT_URL'),
+    ],
+
+    'stellar_commerce' => [
+        'topup_checkout_url' => env('STELLAR_COMMERCE_TOPUP_CHECKOUT_URL'),
+        'username' => env('APPSETTING_API_USERNAME_STELLAR_COMMERCE_API'),
+        'password' => env('APPSETTING_API_PASSWORD_STELLAR_COMMERCE_API'),
     ],
 
     'resend' => [
