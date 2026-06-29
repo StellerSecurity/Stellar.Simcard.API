@@ -137,4 +137,27 @@ class EsimaccessProvider implements EsimProvider
 
         return $response->json();
     }
+
+    public function topup(string $iccid, string $packageCode, string $transactionId): array
+    {
+        $payload = [
+            'transactionId' => $transactionId,
+            'packageInfoList' => [[
+                'packageCode' => $packageCode,
+                'count' => 1,
+                'iccid' => $iccid,
+            ]],
+        ];
+
+        $path = (string) config('services.esimaccess.topup_path', '/v1/open/esim/order');
+        $path = '/' . ltrim($path, '/');
+
+        $response = $this->http()
+            ->withHeaders($this->createHeaders($payload))
+            ->post($this->baseUrl . $path, $payload)
+            ->throw();
+
+        return $response->json();
+    }
+
 }
