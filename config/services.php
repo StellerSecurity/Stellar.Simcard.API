@@ -27,6 +27,13 @@ return [
 
     'stellar_data' => [
         'topup_url' => env('STELLAR_DATA_TOPUP_URL', 'https://data.stellarsecurity.com/topup'),
+        'topup_checkout_url' => env('STELLAR_DATA_TOPUP_CHECKOUT_URL'),
+    ],
+
+    'stellar_commerce' => [
+        'topup_checkout_url' => env('STELLAR_COMMERCE_TOPUP_CHECKOUT_URL'),
+        'username' => env('APPSETTING_API_USERNAME_STELLAR_COMMERCE_API'),
+        'password' => env('APPSETTING_API_PASSWORD_STELLAR_COMMERCE_API'),
     ],
 
     'resend' => [
