@@ -16,6 +16,40 @@ class TopupController extends Controller
         private readonly TopupService $topupService,
     ) {}
 
+
+    public function token(Request $request): JsonResponse
+    {
+        try {
+            $validated = $request->validate([
+                'simcard_id' => ['required', 'string', 'max:64'],
+                'reason' => ['nullable', 'string', 'max:64'],
+            ]);
+
+            return response()->json([
+                'response_code' => 200,
+                'data' => $this->topupService->createToken(
+                    simcardId: (string) $validated['simcard_id'],
+                    reason: (string) ($validated['reason'] ?? 'app_requested'),
+                ),
+            ], 200);
+        } catch (ValidationException $exception) {
+            return response()->json([
+                'response_code' => 422,
+                'errors' => $exception->errors(),
+            ], 422);
+        } catch (RuntimeException $exception) {
+            return response()->json([
+                'response_code' => $this->statusCodeFromException($exception),
+                'response_message' => $exception->getMessage(),
+            ], $this->statusCodeFromException($exception));
+        } catch (Throwable) {
+            return response()->json([
+                'response_code' => 500,
+                'response_message' => 'Top-up token could not be created.',
+            ], 500);
+        }
+    }
+
     public function resolve(string $token): JsonResponse
     {
         try {

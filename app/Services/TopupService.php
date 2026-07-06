@@ -27,7 +27,46 @@ class TopupService
     public function __construct(
         private readonly EsimCryptoService $crypto,
         private readonly EsimProvider $provider,
+        private readonly SimcardActionLinkService $actionLinks,
     ) {}
+
+
+    public function createToken(string $simcardId, string $reason = 'app_requested'): array
+    {
+        $simcardId = $this->normalizeUuid($simcardId, 'Simcard id is invalid.');
+        $reason = trim($reason) !== '' ? trim($reason) : 'app_requested';
+
+        if (strlen($reason) > 64 || ! preg_match('/^[A-Za-z0-9._:\/-]+$/', $reason)) {
+            throw new RuntimeException('Top-up token reason is invalid.', 422);
+        }
+
+        $simcard = Simcard::query()->where('id', $simcardId)->first();
+
+        if ($simcard === null) {
+            throw new RuntimeException('eSIM could not be found.', 404);
+        }
+
+        $iccid = $this->decryptIccid($simcard);
+
+        if ($iccid === null) {
+            throw new RuntimeException('Top-up is not ready yet for this eSIM.', 409);
+        }
+
+        $topupUrl = $this->actionLinks->createTopupUrl($simcard, $reason);
+        $path = parse_url($topupUrl, PHP_URL_PATH);
+        $token = is_string($path) ? basename($path) : '';
+
+        if ($token === '') {
+            throw new RuntimeException('Top-up token could not be created.', 500);
+        }
+
+        return [
+            'token' => $token,
+            'topup_url' => $topupUrl,
+            'expires_in_days' => 14,
+            'simcard_id' => (string) $simcard->id,
+        ];
+    }
 
     public function resolve(string $token): array
     {

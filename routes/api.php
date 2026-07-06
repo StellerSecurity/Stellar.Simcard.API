@@ -11,6 +11,7 @@ Route::post('v1/webhooks/esimaccess', EsimaccessWebhookController::class);
 Route::prefix('v1/topupcontroller')
     ->middleware('stellar.sim.basic')
     ->group(function () {
+        Route::post('/token', [TopupController::class, 'token']);
         Route::get('/resolve/{token}', [TopupController::class, 'resolve']);
         Route::post('/checkout', [TopupController::class, 'checkout']);
         Route::post('/fulfill', [TopupController::class, 'fulfill']);
