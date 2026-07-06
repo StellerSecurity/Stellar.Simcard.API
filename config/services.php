@@ -19,7 +19,7 @@ return [
     ],
 
     'esimaccess' => [
-        'base_url'    => env('ESIMACCESS_BASE_URL', 'https://api.esimaccess.com/api'),
+        'base_url'    => env('ESIMACCESS_BASE_URL'),
         'access_code' => env('ESIMACCESS_ACCESS_CODE'),
         'secret_key'  => env('ESIMACCESS_SECRET_KEY'),
         'topup_path'  => env('ESIMACCESS_TOPUP_PATH', '/v1/open/esim/topup'),
