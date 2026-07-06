@@ -31,16 +31,16 @@ class TopupService
     ) {}
 
 
-    public function createToken(string $simcardId, string $reason = 'app_requested'): array
+    public function createToken(string $simId, string $reason = 'app_requested'): array
     {
-        $simcardId = $this->normalizeUuid($simcardId, 'Simcard id is invalid.');
+        $simId = $this->normalizeSimId($simId);
         $reason = trim($reason) !== '' ? trim($reason) : 'app_requested';
 
         if (strlen($reason) > 64 || ! preg_match('/^[A-Za-z0-9._:\/-]+$/', $reason)) {
             throw new RuntimeException('Top-up token reason is invalid.', 422);
         }
 
-        $simcard = Simcard::query()->where('id', $simcardId)->first();
+        $simcard = $this->findSimcardForTopupSimId($simId);
 
         if ($simcard === null) {
             throw new RuntimeException('eSIM could not be found.', 404);
@@ -64,6 +64,7 @@ class TopupService
             'token' => $token,
             'topup_url' => $topupUrl,
             'expires_in_days' => 14,
+            'sim_id' => $simId,
             'simcard_id' => (string) $simcard->id,
         ];
     }
@@ -351,6 +352,25 @@ class TopupService
         }
 
         return $token;
+    }
+
+
+    private function findSimcardForTopupSimId(string $simId): ?Simcard
+    {
+        $planIdHash = $this->crypto->derivePlanHash($simId);
+
+        return Simcard::query()->where('plan_id_hash', $planIdHash)->first();
+    }
+
+    private function normalizeSimId(string $value): string
+    {
+        $value = preg_replace('/\s+/', '', trim($value));
+
+        if (! is_string($value) || $value === '' || preg_match('/^[A-Za-z0-9]{16}$/', $value) !== 1) {
+            throw new RuntimeException('Sim id is invalid.', 422);
+        }
+
+        return $value;
     }
 
     private function normalizePackageCode(string $packageCode): string

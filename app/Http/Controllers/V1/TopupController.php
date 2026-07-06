@@ -21,14 +21,14 @@ class TopupController extends Controller
     {
         try {
             $validated = $request->validate([
-                'simcard_id' => ['required', 'string', 'max:64'],
+                'sim_id' => ['required', 'string', 'regex:/^[A-Za-z0-9]{16}$/'],
                 'reason' => ['nullable', 'string', 'max:64'],
             ]);
 
             return response()->json([
                 'response_code' => 200,
                 'data' => $this->topupService->createToken(
-                    simcardId: (string) $validated['simcard_id'],
+                    simId: (string) $validated['sim_id'],
                     reason: (string) ($validated['reason'] ?? 'app_requested'),
                 ),
             ], 200);
