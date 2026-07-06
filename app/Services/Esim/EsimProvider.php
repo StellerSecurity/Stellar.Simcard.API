@@ -6,11 +6,6 @@ interface EsimProvider
 {
     public function listPlans(array $filters = []): array;
 
-    /**
-     * List provider-approved top-up/recharge packages for an existing ICCID.
-     */
-    public function listTopupPlans(string $iccid): array;
-
     public function createOrder(string $packageCode): EsimProviderOrder;
 
     public function queryOrder(string $externalOrderId): array;

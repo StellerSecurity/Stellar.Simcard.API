@@ -68,33 +68,6 @@ class EsimaccessProvider implements EsimProvider
         return $response->json();
     }
 
-
-    public function listTopupPlans(string $iccid): array
-    {
-        $iccid = trim($iccid);
-
-        if ($iccid === '') {
-            throw new \InvalidArgumentException('ICCID is required for top-up package list.');
-        }
-
-        // eSIMAccess top-up plans must be requested for the concrete ICCID.
-        // Do not send locationCode/packageCode here; that can return normal sale packages
-        // such as CKH082/CKH168, which are not necessarily valid for /esim/topup.
-        $payload = [
-            'iccid' => $iccid,
-        ];
-
-        $path = (string) config('services.esimaccess.topup_package_list_path', '/v1/open/package/list');
-        $path = '/' . ltrim($path, '/');
-
-        $response = $this->http()
-            ->withHeaders($this->createHeaders($payload))
-            ->post($this->baseUrl . $path, $payload)
-            ->throw();
-
-        return $response->json();
-    }
-
     public function createOrder(string $packageCode): EsimProviderOrder
     {
         $transactionId = Str::random(16);
@@ -170,8 +143,13 @@ class EsimaccessProvider implements EsimProvider
         $payload = [
             'transactionId' => $transactionId,
             'iccid' => $iccid,
-            'packageCode' => $packageCode,
         ];
+
+        if (str_starts_with(strtoupper($packageCode), 'TOPUP_')) {
+            $payload['packageCode'] = $packageCode;
+        } else {
+            $payload['slug'] = $packageCode;
+        }
 
         $path = (string) config('services.esimaccess.topup_path', '/v1/open/esim/topup');
         $path = '/' . ltrim($path, '/');

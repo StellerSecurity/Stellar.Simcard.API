@@ -70,24 +70,21 @@ class TopupService
     {
         [$link, $simcard, $iccid] = $this->resolveValidLink($token);
 
-        $allPlans = $iccid !== null
-            ? $this->normalizeTopupPlans($this->listTopupPlansForIccid($simcard, $iccid))
-            : [];
-
-        $currentPlan = $this->findPlanByPackageCode($allPlans, (string) $simcard->package_code)
-            ?: $this->fallbackCurrentPlanFromSimcard($simcard);
+        $providerPlans = $this->listPlansForResolve($simcard, $iccid);
+        $plans = $this->normalizeTopupPlans($providerPlans);
+        $currentPlan = $this->fallbackCurrentPlanFromSimcard($simcard);
 
         return [
             'token_status' => 'valid',
-            'topup_ready' => $iccid !== null && $allPlans !== [],
+            'topup_ready' => $iccid !== null,
             'link' => [
                 'expires_at' => optional($link->expires_at)->toISOString(),
                 'reason' => Arr::get((array) $link->metadata_redacted, 'reason'),
             ],
             'sim' => $this->safeSimPayload($simcard, $currentPlan),
             'current_plan' => $currentPlan ? $this->safePlanPayload($currentPlan) : null,
-            'plans' => $allPlans,
-            'topups' => $allPlans,
+            'plans' => $plans,
+            'topups' => $plans,
         ];
     }
 
@@ -96,15 +93,16 @@ class TopupService
         [$link, $simcard, $iccid] = $this->resolveValidLink($token);
         $packageCode = $this->normalizePackageCode($packageCode);
 
-        if ($iccid === null) {
+        if ($iccid === null || trim($iccid) === '') {
             throw new RuntimeException('Top-up is not ready yet for this eSIM.', 409);
         }
 
-        $allPlans = $this->normalizeTopupPlans($this->listTopupPlansForIccid($simcard, $iccid));
-        $matchedPlan = $this->findPlanByPackageCode($allPlans, $packageCode);
+        $providerPlans = $this->provider->listPlans(['iccid' => $iccid]);
+        $plans = $this->normalizeTopupPlans($providerPlans);
+        $matchedPlan = $this->findPlanByPackageCode($plans, $packageCode);
 
         if ($matchedPlan === null) {
-            throw new RuntimeException('Selected top-up package is not available for this eSIM. Refresh the top-up page and choose a provider-approved top-up package.', 422);
+            throw new RuntimeException('Selected top-up package is not available for this eSIM.', 422);
         }
 
         $session = $this->createOrReuseTopupSession($link, $simcard, $matchedPlan, $packageCode);
@@ -263,13 +261,22 @@ class TopupService
         return [$link, $simcard, $iccid];
     }
 
-    private function listTopupPlansForIccid(Simcard $simcard, string $iccid): array
+    private function listPlansForResolve(Simcard $simcard, ?string $iccid): array
     {
+        $filters = [];
+
+        if ($iccid === null || trim($iccid) === '') {
+            return [];
+        }
+
+        $filters['iccid'] = $iccid;
+
         try {
-            return $this->provider->listTopupPlans($iccid);
+            return $this->provider->listPlans($filters);
         } catch (Throwable $exception) {
-            Log::warning('Could not list provider top-up plans for eSIM.', [
+            Log::warning('Could not list top-up plans while resolving top-up link.', [
                 'simcard_id' => $simcard->id,
+                'has_iccid' => $iccid !== null,
                 'package_code' => $simcard->package_code,
                 'exception' => basename(str_replace('\\', '/', get_class($exception))),
             ]);
@@ -531,21 +538,20 @@ class TopupService
                 continue;
             }
 
-            $explicitTopupCode = $this->stringFromKeys($package, [
-                'topupPackageCode',
-                'topUpPackageCode',
-                'topUpDataPlanCode',
-                'topupDataPlanCode',
-                'dataPlanCode',
-                'topupCode',
-                'topUpCode',
-                'rechargePackageCode',
-                'rechargeCode',
-            ]);
+            $providerSalePackageCode = $this->stringFromKeys($package, ['packageCode', 'package_code', 'code', 'sku']);
+            $slug = $this->stringFromKeys($package, ['slug', 'packageSlug', 'package_slug']);
+            $explicitTopupPackageCode = is_string($providerSalePackageCode)
+                && str_starts_with(strtoupper($providerSalePackageCode), 'TOPUP_');
 
-            $fallbackPackageCode = $this->stringFromKeys($package, ['packageCode', 'package_code', 'code', 'sku']);
-            $code = $explicitTopupCode ?: $fallbackPackageCode;
-            if ($code === null) {
+            if ($explicitTopupPackageCode) {
+                $code = $providerSalePackageCode;
+                $topupPayloadType = 'packageCode';
+            } elseif ($slug !== null) {
+                // eSIMAccess top-up accepts either a recharge packageCode that starts with TOPUP_
+                // or the package slug. Normal sale package codes such as CKH166/CKH082 must not be used.
+                $code = $slug;
+                $topupPayloadType = 'slug';
+            } else {
                 continue;
             }
 
@@ -563,9 +569,11 @@ class TopupService
                 'package_code' => $code,
                 'code' => $code,
                 'sku' => $code,
-                'provider_topup_code' => $explicitTopupCode,
-                'provider_sale_package_code' => $fallbackPackageCode,
-                'is_explicit_provider_topup_code' => $explicitTopupCode !== null,
+                'provider_topup_code' => $explicitTopupPackageCode ? $code : null,
+                'provider_topup_slug' => $topupPayloadType === 'slug' ? $code : null,
+                'topup_payload_type' => $topupPayloadType,
+                'provider_sale_package_code' => $providerSalePackageCode,
+                'is_explicit_provider_topup_code' => true,
                 'name' => $name ?? $code,
                 'package_name' => $name ?? $code,
                 'data_gb' => $this->bytesToGb($volumeBytes),
@@ -583,43 +591,17 @@ class TopupService
             ], static fn ($value) => $value !== null && $value !== '');
         }
 
-        $explicitTopupPlans = array_values(array_filter(
-            $plans,
-            static fn (array $plan): bool => (bool) ($plan['is_explicit_provider_topup_code'] ?? false)
-        ));
-
-        // Fail closed: if eSIMAccess sends explicit top-up data plan codes, never expose the
-        // normal sale packageCode values. That is what caused CKH082 to be sold as a top-up
-        // code and rejected by /esim/topup.
-        return $explicitTopupPlans !== [] ? $explicitTopupPlans : $plans;
+        return $plans;
     }
 
     private function extractPackageList(array $response): array
     {
         $candidates = [
-            Arr::get($response, 'obj.topupPackageList'),
-            Arr::get($response, 'obj.topUpPackageList'),
-            Arr::get($response, 'obj.topupList'),
-            Arr::get($response, 'obj.topUpList'),
-            Arr::get($response, 'obj.topupDataPlanList'),
-            Arr::get($response, 'obj.topUpDataPlanList'),
             Arr::get($response, 'obj.packageList'),
             Arr::get($response, 'obj.packageList.data'),
             Arr::get($response, 'obj.packages'),
-            Arr::get($response, 'data.topupPackageList'),
-            Arr::get($response, 'data.topUpPackageList'),
-            Arr::get($response, 'data.topupList'),
-            Arr::get($response, 'data.topUpList'),
-            Arr::get($response, 'data.topupDataPlanList'),
-            Arr::get($response, 'data.topUpDataPlanList'),
             Arr::get($response, 'data.packageList'),
             Arr::get($response, 'data.packages'),
-            Arr::get($response, 'topupPackageList'),
-            Arr::get($response, 'topUpPackageList'),
-            Arr::get($response, 'topupList'),
-            Arr::get($response, 'topUpList'),
-            Arr::get($response, 'topupDataPlanList'),
-            Arr::get($response, 'topUpDataPlanList'),
             Arr::get($response, 'packageList'),
             Arr::get($response, 'packages'),
             Arr::get($response, 'plans'),
