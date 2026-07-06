@@ -140,16 +140,13 @@ class EsimaccessProvider implements EsimProvider
 
     public function topup(string $iccid, string $packageCode, string $transactionId): array
     {
+        // eSIMAccess /esim/topup expects the HTTP field name "packageCode".
+        // The value may be either a recharge code starting with TOPUP_ or a package slug.
         $payload = [
             'transactionId' => $transactionId,
             'iccid' => $iccid,
+            'packageCode' => $packageCode,
         ];
-
-        if (str_starts_with(strtoupper($packageCode), 'TOPUP_')) {
-            $payload['packageCode'] = $packageCode;
-        } else {
-            $payload['slug'] = $packageCode;
-        }
 
         $path = (string) config('services.esimaccess.topup_path', '/v1/open/esim/topup');
         $path = '/' . ltrim($path, '/');

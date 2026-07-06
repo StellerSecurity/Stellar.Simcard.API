@@ -70,9 +70,12 @@ class TopupService
     {
         [$link, $simcard, $iccid] = $this->resolveValidLink($token);
 
+        $currentPlan = $this->currentPlanForSimcard($simcard);
         $providerPlans = $this->listPlansForResolve($simcard, $iccid);
-        $plans = $this->normalizeTopupPlans($providerPlans);
-        $currentPlan = $this->fallbackCurrentPlanFromSimcard($simcard);
+        $plans = $this->filterPlansForCurrentPackage(
+            $this->normalizeTopupPlans($providerPlans),
+            $currentPlan
+        );
 
         return [
             'token_status' => 'valid',
@@ -97,8 +100,12 @@ class TopupService
             throw new RuntimeException('Top-up is not ready yet for this eSIM.', 409);
         }
 
+        $currentPlan = $this->currentPlanForSimcard($simcard);
         $providerPlans = $this->provider->listPlans(['iccid' => $iccid]);
-        $plans = $this->normalizeTopupPlans($providerPlans);
+        $plans = $this->filterPlansForCurrentPackage(
+            $this->normalizeTopupPlans($providerPlans),
+            $currentPlan
+        );
         $matchedPlan = $this->findPlanByPackageCode($plans, $packageCode);
 
         if ($matchedPlan === null) {
@@ -283,6 +290,38 @@ class TopupService
 
             return [];
         }
+    }
+
+    private function currentPlanForSimcard(Simcard $simcard): ?array
+    {
+        $packageCode = is_string($simcard->package_code) ? trim($simcard->package_code) : '';
+
+        if ($packageCode !== '') {
+            try {
+                $response = $this->provider->listPlans(['packageCode' => $packageCode]);
+                $packages = $this->extractPackageList($response);
+
+                foreach ($packages as $package) {
+                    if (! is_array($package)) {
+                        continue;
+                    }
+
+                    $candidate = $this->stringFromKeys($package, ['packageCode', 'package_code', 'code', 'sku']);
+
+                    if ($candidate !== null && strcasecmp($candidate, $packageCode) === 0) {
+                        return $this->normalizeProviderPlan($package, $packageCode);
+                    }
+                }
+            } catch (Throwable $exception) {
+                Log::warning('Could not fetch current provider package while resolving top-up.', [
+                    'simcard_id' => $simcard->id,
+                    'package_code' => $packageCode,
+                    'exception' => basename(str_replace('\\', '/', get_class($exception))),
+                ]);
+            }
+        }
+
+        return $this->fallbackCurrentPlanFromSimcard($simcard);
     }
 
     private function fallbackCurrentPlanFromSimcard(Simcard $simcard): ?array
@@ -540,58 +579,103 @@ class TopupService
 
             $providerSalePackageCode = $this->stringFromKeys($package, ['packageCode', 'package_code', 'code', 'sku']);
             $slug = $this->stringFromKeys($package, ['slug', 'packageSlug', 'package_slug']);
-            $explicitTopupPackageCode = is_string($providerSalePackageCode)
-                && str_starts_with(strtoupper($providerSalePackageCode), 'TOPUP_');
+            $explicitTopupPackageCode = $this->firstTopupPackageCode($package, $providerSalePackageCode);
 
-            if ($explicitTopupPackageCode) {
-                $code = $providerSalePackageCode;
-                $topupPayloadType = 'packageCode';
+            if ($explicitTopupPackageCode !== null) {
+                $topupValue = $explicitTopupPackageCode;
+                $topupValueType = 'package_code';
             } elseif ($slug !== null) {
-                // eSIMAccess top-up accepts either a recharge packageCode that starts with TOPUP_
-                // or the package slug. Normal sale package codes such as CKH166/CKH082 must not be used.
-                $code = $slug;
-                $topupPayloadType = 'slug';
+                // eSIMAccess top-up still expects the HTTP field name packageCode.
+                // The value may be either a recharge code starting with TOPUP_ or the package slug.
+                $topupValue = $slug;
+                $topupValueType = 'slug';
             } else {
+                // Normal sale codes like CKH166 / CKH082 / CKH168 are not valid recharge values.
                 continue;
             }
 
-            $name = $this->stringFromKeys($package, ['packageName', 'name', 'title', 'label']);
-            $volumeBytes = $this->intFromKeys($package, ['volume', 'totalVolume', 'dataVolume', 'data', 'amount']);
-            $durationDays = $this->intFromKeys($package, ['duration', 'durationDay', 'duration_days', 'validity', 'validityDays', 'validity_days', 'days']);
-            $priceCents = $this->priceCentsFromPackage($package);
-            $currency = $this->stringFromKeys($package, ['currency', 'currencyCode', 'priceCurrency', 'price_currency']) ?? 'EUR';
-            $locationCode = $this->stringFromKeys($package, ['locationCode', 'location_code']);
-            $location = $this->stringFromKeys($package, ['location']);
-            $locationName = $this->stringFromKeys($package, ['locationName', 'locationNetworkList.0.locationName']);
-            $speed = $this->stringFromKeys($package, ['speed']);
+            $plan = $this->normalizeProviderPlan($package, $topupValue);
+            $plan['package_code'] = $topupValue;
+            $plan['code'] = $topupValue;
+            $plan['sku'] = $topupValue;
+            $plan['provider_topup_value'] = $topupValue;
+            $plan['provider_topup_code'] = $topupValueType === 'package_code' ? $topupValue : null;
+            $plan['provider_topup_slug'] = $topupValueType === 'slug' ? $topupValue : null;
+            $plan['provider_sale_package_code'] = $providerSalePackageCode;
+            $plan['topup_payload_type'] = $topupValueType;
+            $plan['topup_payload_field'] = 'packageCode';
+            $plan['is_explicit_provider_topup_code'] = $topupValueType === 'package_code';
 
-            $plans[] = array_filter([
-                'package_code' => $code,
-                'code' => $code,
-                'sku' => $code,
-                'provider_topup_code' => $explicitTopupPackageCode ? $code : null,
-                'provider_topup_slug' => $topupPayloadType === 'slug' ? $code : null,
-                'topup_payload_type' => $topupPayloadType,
-                'provider_sale_package_code' => $providerSalePackageCode,
-                'is_explicit_provider_topup_code' => true,
-                'name' => $name ?? $code,
-                'package_name' => $name ?? $code,
-                'data_gb' => $this->bytesToGb($volumeBytes),
-                'data_bytes' => $volumeBytes,
-                'duration_days' => $durationDays,
-                'validity_days' => $durationDays,
-                'price_cents' => $priceCents,
-                'unit_price_cents' => $priceCents,
-                'currency' => strtoupper($currency),
-                'location_code' => $locationCode,
-                'location' => $location,
-                'location_name' => $locationName,
-                'speed' => $speed,
-                'raw' => $package,
-            ], static fn ($value) => $value !== null && $value !== '');
+            $plans[] = array_filter($plan, static fn ($value) => $value !== null && $value !== '');
         }
 
-        return $plans;
+        return array_values($plans);
+    }
+
+    private function normalizeProviderPlan(array $package, string $fallbackCode): array
+    {
+        $name = $this->stringFromKeys($package, ['packageName', 'name', 'title', 'label']);
+        $volumeBytes = $this->intFromKeys($package, ['volume', 'totalVolume', 'dataVolume', 'data', 'amount']);
+        $durationDays = $this->intFromKeys($package, ['duration', 'durationDay', 'duration_days', 'validity', 'validityDays', 'validity_days', 'days']);
+        $priceCents = $this->priceCentsFromPackage($package);
+        $currency = $this->stringFromKeys($package, ['currency', 'currencyCode', 'priceCurrency', 'price_currency']) ?? 'EUR';
+        $locationCode = $this->stringFromKeys($package, ['locationCode', 'location_code']);
+        $location = $this->stringFromKeys($package, ['location']);
+        $locationName = $this->stringFromKeys($package, ['locationName', 'locationNetworkList.0.locationName']);
+        $speed = $this->stringFromKeys($package, ['speed']);
+
+        return array_filter([
+            'package_code' => $fallbackCode,
+            'code' => $fallbackCode,
+            'sku' => $fallbackCode,
+            'name' => $name ?? $fallbackCode,
+            'package_name' => $name ?? $fallbackCode,
+            'data_gb' => $this->bytesToGb($volumeBytes),
+            'data_bytes' => $volumeBytes,
+            'duration_days' => $durationDays,
+            'validity_days' => $durationDays,
+            'price_cents' => $priceCents,
+            'unit_price_cents' => $priceCents,
+            'currency' => strtoupper($currency),
+            'location_code' => $locationCode,
+            'location' => $location,
+            'location_name' => $locationName,
+            'speed' => $speed,
+            'raw' => $package,
+        ], static fn ($value) => $value !== null && $value !== '');
+    }
+
+    private function firstTopupPackageCode(array $package, ?string $fallbackCode = null): ?string
+    {
+        $candidates = [
+            'topupPackageCode',
+            'topUpPackageCode',
+            'topup_package_code',
+            'top_up_package_code',
+            'rechargePackageCode',
+            'recharge_package_code',
+            'rechargeCode',
+            'topupCode',
+            'topUpCode',
+            'packageCode',
+            'package_code',
+            'code',
+            'sku',
+        ];
+
+        foreach ($candidates as $key) {
+            $value = $this->stringFromKeys($package, [$key]);
+
+            if ($value !== null && str_starts_with(strtoupper($value), 'TOPUP_')) {
+                return $value;
+            }
+        }
+
+        if ($fallbackCode !== null && str_starts_with(strtoupper($fallbackCode), 'TOPUP_')) {
+            return $fallbackCode;
+        }
+
+        return null;
     }
 
     private function extractPackageList(array $response): array
@@ -619,6 +703,10 @@ class TopupService
 
     private function filterPlansForCurrentPackage(array $plans, ?array $currentPlan): array
     {
+        if ($plans === []) {
+            return [];
+        }
+
         if ($currentPlan === null) {
             return [];
         }
@@ -659,7 +747,6 @@ class TopupService
             'locationCode',
             'raw.locationCode',
             'raw.location_code',
-            'raw.slug',
         ]);
     }
 
