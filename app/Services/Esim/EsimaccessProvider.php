@@ -77,9 +77,9 @@ class EsimaccessProvider implements EsimProvider
             throw new \InvalidArgumentException('ICCID is required for top-up package list.');
         }
 
-        // eSIMAccess returns top-up-compatible packages when package/list is queried with ICCID.
-        // Do not include locationCode/type/packageCode here; those can make provider return normal
-        // sale packages, which are not necessarily valid for /esim/topup.
+        // eSIMAccess top-up plans must be requested for the concrete ICCID.
+        // Do not send locationCode/packageCode here; that can return normal sale packages
+        // such as CKH082/CKH168, which are not necessarily valid for /esim/topup.
         $payload = [
             'iccid' => $iccid,
         ];

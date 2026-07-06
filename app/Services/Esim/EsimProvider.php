@@ -7,7 +7,7 @@ interface EsimProvider
     public function listPlans(array $filters = []): array;
 
     /**
-     * List packages that are valid for topping up an existing eSIM ICCID.
+     * List provider-approved top-up/recharge packages for an existing ICCID.
      */
     public function listTopupPlans(string $iccid): array;
 

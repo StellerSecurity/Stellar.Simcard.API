@@ -70,30 +70,24 @@ class TopupService
     {
         [$link, $simcard, $iccid] = $this->resolveValidLink($token);
 
-        $currentPlan = $this->fallbackCurrentPlanFromSimcard($simcard);
-        $plans = [];
+        $allPlans = $iccid !== null
+            ? $this->normalizeTopupPlans($this->listTopupPlansForIccid($simcard, $iccid))
+            : [];
 
-        if ($iccid !== null) {
-            $providerPlans = $this->listTopupPlansForIccid($simcard, $iccid);
-            $plans = $this->normalizeTopupPlans($providerPlans);
-
-            // The provider response is authoritative for top-up. Do not broaden the result by
-            // location/current country, because normal sale package codes can fail on /esim/topup.
-            $currentPlan = $this->findPlanByPackageCode($plans, (string) $simcard->package_code)
-                ?: $currentPlan;
-        }
+        $currentPlan = $this->findPlanByPackageCode($allPlans, (string) $simcard->package_code)
+            ?: $this->fallbackCurrentPlanFromSimcard($simcard);
 
         return [
             'token_status' => 'valid',
-            'topup_ready' => $iccid !== null && $plans !== [],
+            'topup_ready' => $iccid !== null && $allPlans !== [],
             'link' => [
                 'expires_at' => optional($link->expires_at)->toISOString(),
                 'reason' => Arr::get((array) $link->metadata_redacted, 'reason'),
             ],
             'sim' => $this->safeSimPayload($simcard, $currentPlan),
             'current_plan' => $currentPlan ? $this->safePlanPayload($currentPlan) : null,
-            'plans' => $plans,
-            'topups' => $plans,
+            'plans' => $allPlans,
+            'topups' => $allPlans,
         ];
     }
 
@@ -106,12 +100,11 @@ class TopupService
             throw new RuntimeException('Top-up is not ready yet for this eSIM.', 409);
         }
 
-        $providerPlans = $this->listTopupPlansForIccid($simcard, $iccid);
-        $plans = $this->normalizeTopupPlans($providerPlans);
-        $matchedPlan = $this->findPlanByPackageCode($plans, $packageCode);
+        $allPlans = $this->normalizeTopupPlans($this->listTopupPlansForIccid($simcard, $iccid));
+        $matchedPlan = $this->findPlanByPackageCode($allPlans, $packageCode);
 
         if ($matchedPlan === null) {
-            throw new RuntimeException('Selected package is not a valid top-up package for this eSIM.', 422);
+            throw new RuntimeException('Selected top-up package is not available for this eSIM. Refresh the top-up page and choose a provider-approved top-up package.', 422);
         }
 
         $session = $this->createOrReuseTopupSession($link, $simcard, $matchedPlan, $packageCode);
@@ -538,7 +531,20 @@ class TopupService
                 continue;
             }
 
-            $code = $this->stringFromKeys($package, ['packageCode', 'package_code', 'code', 'sku']);
+            $explicitTopupCode = $this->stringFromKeys($package, [
+                'topupPackageCode',
+                'topUpPackageCode',
+                'topUpDataPlanCode',
+                'topupDataPlanCode',
+                'dataPlanCode',
+                'topupCode',
+                'topUpCode',
+                'rechargePackageCode',
+                'rechargeCode',
+            ]);
+
+            $fallbackPackageCode = $this->stringFromKeys($package, ['packageCode', 'package_code', 'code', 'sku']);
+            $code = $explicitTopupCode ?: $fallbackPackageCode;
             if ($code === null) {
                 continue;
             }
@@ -557,6 +563,9 @@ class TopupService
                 'package_code' => $code,
                 'code' => $code,
                 'sku' => $code,
+                'provider_topup_code' => $explicitTopupCode,
+                'provider_sale_package_code' => $fallbackPackageCode,
+                'is_explicit_provider_topup_code' => $explicitTopupCode !== null,
                 'name' => $name ?? $code,
                 'package_name' => $name ?? $code,
                 'data_gb' => $this->bytesToGb($volumeBytes),
@@ -574,17 +583,43 @@ class TopupService
             ], static fn ($value) => $value !== null && $value !== '');
         }
 
-        return $plans;
+        $explicitTopupPlans = array_values(array_filter(
+            $plans,
+            static fn (array $plan): bool => (bool) ($plan['is_explicit_provider_topup_code'] ?? false)
+        ));
+
+        // Fail closed: if eSIMAccess sends explicit top-up data plan codes, never expose the
+        // normal sale packageCode values. That is what caused CKH082 to be sold as a top-up
+        // code and rejected by /esim/topup.
+        return $explicitTopupPlans !== [] ? $explicitTopupPlans : $plans;
     }
 
     private function extractPackageList(array $response): array
     {
         $candidates = [
+            Arr::get($response, 'obj.topupPackageList'),
+            Arr::get($response, 'obj.topUpPackageList'),
+            Arr::get($response, 'obj.topupList'),
+            Arr::get($response, 'obj.topUpList'),
+            Arr::get($response, 'obj.topupDataPlanList'),
+            Arr::get($response, 'obj.topUpDataPlanList'),
             Arr::get($response, 'obj.packageList'),
             Arr::get($response, 'obj.packageList.data'),
             Arr::get($response, 'obj.packages'),
+            Arr::get($response, 'data.topupPackageList'),
+            Arr::get($response, 'data.topUpPackageList'),
+            Arr::get($response, 'data.topupList'),
+            Arr::get($response, 'data.topUpList'),
+            Arr::get($response, 'data.topupDataPlanList'),
+            Arr::get($response, 'data.topUpDataPlanList'),
             Arr::get($response, 'data.packageList'),
             Arr::get($response, 'data.packages'),
+            Arr::get($response, 'topupPackageList'),
+            Arr::get($response, 'topUpPackageList'),
+            Arr::get($response, 'topupList'),
+            Arr::get($response, 'topUpList'),
+            Arr::get($response, 'topupDataPlanList'),
+            Arr::get($response, 'topUpDataPlanList'),
             Arr::get($response, 'packageList'),
             Arr::get($response, 'packages'),
             Arr::get($response, 'plans'),
