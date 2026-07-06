@@ -160,10 +160,31 @@ class TopupService
             throw new RuntimeException('Top-up is not ready yet for this eSIM.', 409);
         }
 
-        $transactionId = $idempotencyKey ?: 'topup-' . Str::replace('-', '', (string) $session->id);
+        // Do not use the Commerce idempotency key here; it can exceed the provider limit.
+        $transactionId = $this->providerTransactionId($session);
 
         try {
             $providerResponse = $this->provider->topup($iccid, (string) $session->package_code, $transactionId);
+            $redactedProviderResponse = $this->redactProviderPayload($providerResponse);
+
+            if (! $this->providerTopupSucceeded($providerResponse)) {
+                $failureReason = $this->providerFailureReason($providerResponse);
+
+                $session->status = self::STATUS_FAILED;
+                $session->commerce_order_id = $commerceOrderId ?: $session->commerce_order_id;
+                $session->commerce_order_item_id = $commerceOrderItemId ?: $session->commerce_order_item_id;
+                $session->supplier_reference = null;
+                $session->fulfilled_at = null;
+                $session->failure_reason = $failureReason;
+                $session->meta = array_merge((array) $session->meta, [
+                    'provider_result_redacted' => $redactedProviderResponse,
+                    'provider_transaction_id' => $transactionId,
+                ]);
+                $session->save();
+
+                throw new RuntimeException($failureReason, 502);
+            }
+
             $supplierReference = $this->extractSupplierReference($providerResponse) ?: $transactionId;
 
             $session->status = self::STATUS_FULFILLED;
@@ -174,7 +195,8 @@ class TopupService
             $session->fulfilled_at = now();
             $session->failure_reason = null;
             $session->meta = array_merge((array) $session->meta, [
-                'provider_result_redacted' => $this->redactProviderPayload($providerResponse),
+                'provider_result_redacted' => $redactedProviderResponse,
+                'provider_transaction_id' => $transactionId,
             ]);
             $session->save();
 
@@ -187,7 +209,12 @@ class TopupService
             $session->status = self::STATUS_FAILED;
             $session->commerce_order_id = $commerceOrderId ?: $session->commerce_order_id;
             $session->commerce_order_item_id = $commerceOrderItemId ?: $session->commerce_order_item_id;
+            $session->supplier_reference = null;
+            $session->fulfilled_at = null;
             $session->failure_reason = $exception->getMessage();
+            $session->meta = array_merge((array) $session->meta, [
+                'provider_transaction_id' => $transactionId,
+            ]);
             $session->save();
 
             Log::warning('Supplier top-up fulfillment failed.', [
@@ -197,7 +224,7 @@ class TopupService
                 'exception' => basename(str_replace('\\', '/', get_class($exception))),
             ]);
 
-            throw new RuntimeException('Top-up fulfillment failed.', 502);
+            throw new RuntimeException('Top-up fulfillment failed: ' . $exception->getMessage(), 502);
         }
     }
 
@@ -692,6 +719,51 @@ class TopupService
         }
 
         return null;
+    }
+
+    private function providerTransactionId(SimcardTopupSession $session): string
+    {
+        $transactionId = 'tu_' . Str::replace('-', '', (string) $session->id);
+
+        return substr($transactionId, 0, 50);
+    }
+
+    private function providerTopupSucceeded(array $payload): bool
+    {
+        $success = Arr::get($payload, 'success');
+
+        if ($success === true || $success === 1 || $success === '1') {
+            return true;
+        }
+
+        if (is_string($success) && strtolower($success) === 'true') {
+            return true;
+        }
+
+        $errorCode = Arr::get($payload, 'errorCode') ?? Arr::get($payload, 'code');
+        $errorMessage = Arr::get($payload, 'errorMsg') ?? Arr::get($payload, 'message');
+
+        return empty($errorCode) && empty($errorMessage) && (Arr::has($payload, 'obj') || Arr::has($payload, 'data'));
+    }
+
+    private function providerFailureReason(array $payload): string
+    {
+        $message = Arr::get($payload, 'errorMsg')
+            ?? Arr::get($payload, 'message')
+            ?? Arr::get($payload, 'data.errorMsg')
+            ?? Arr::get($payload, 'obj.errorMsg')
+            ?? 'Provider top-up failed';
+
+        $code = Arr::get($payload, 'errorCode')
+            ?? Arr::get($payload, 'code')
+            ?? Arr::get($payload, 'data.errorCode')
+            ?? Arr::get($payload, 'obj.errorCode');
+
+        if ($code !== null && trim((string) $code) !== '') {
+            return trim((string) $message) . ' [' . trim((string) $code) . ']';
+        }
+
+        return trim((string) $message);
     }
 
     private function redactProviderPayload(array $payload): array
