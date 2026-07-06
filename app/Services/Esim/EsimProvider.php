@@ -6,6 +6,11 @@ interface EsimProvider
 {
     public function listPlans(array $filters = []): array;
 
+    /**
+     * List packages that are valid for topping up an existing eSIM ICCID.
+     */
+    public function listTopupPlans(string $iccid): array;
+
     public function createOrder(string $packageCode): EsimProviderOrder;
 
     public function queryOrder(string $externalOrderId): array;

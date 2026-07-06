@@ -70,15 +70,22 @@ class TopupService
     {
         [$link, $simcard, $iccid] = $this->resolveValidLink($token);
 
-        $providerPlans = $this->listPlansForResolve($simcard, $iccid);
-        $allPlans = $this->normalizeTopupPlans($providerPlans);
-        $currentPlan = $this->findPlanByPackageCode($allPlans, (string) $simcard->package_code)
-            ?: $this->fallbackCurrentPlanFromSimcard($simcard);
-        $plans = $this->filterPlansForCurrentPackage($allPlans, $currentPlan);
+        $currentPlan = $this->fallbackCurrentPlanFromSimcard($simcard);
+        $plans = [];
+
+        if ($iccid !== null) {
+            $providerPlans = $this->listTopupPlansForIccid($simcard, $iccid);
+            $plans = $this->normalizeTopupPlans($providerPlans);
+
+            // The provider response is authoritative for top-up. Do not broaden the result by
+            // location/current country, because normal sale package codes can fail on /esim/topup.
+            $currentPlan = $this->findPlanByPackageCode($plans, (string) $simcard->package_code)
+                ?: $currentPlan;
+        }
 
         return [
             'token_status' => 'valid',
-            'topup_ready' => $iccid !== null,
+            'topup_ready' => $iccid !== null && $plans !== [],
             'link' => [
                 'expires_at' => optional($link->expires_at)->toISOString(),
                 'reason' => Arr::get((array) $link->metadata_redacted, 'reason'),
@@ -95,14 +102,16 @@ class TopupService
         [$link, $simcard, $iccid] = $this->resolveValidLink($token);
         $packageCode = $this->normalizePackageCode($packageCode);
 
-        $providerPlans = $this->provider->listPlans(['iccid' => $iccid]);
-        $allPlans = $this->normalizeTopupPlans($providerPlans);
-        $currentPlan = $this->findPlanByPackageCode($allPlans, (string) $simcard->package_code);
-        $plans = $this->filterPlansForCurrentPackage($allPlans, $currentPlan);
+        if ($iccid === null) {
+            throw new RuntimeException('Top-up is not ready yet for this eSIM.', 409);
+        }
+
+        $providerPlans = $this->listTopupPlansForIccid($simcard, $iccid);
+        $plans = $this->normalizeTopupPlans($providerPlans);
         $matchedPlan = $this->findPlanByPackageCode($plans, $packageCode);
 
         if ($matchedPlan === null) {
-            throw new RuntimeException('Selected top-up package is not available for this eSIM.', 422);
+            throw new RuntimeException('Selected package is not a valid top-up package for this eSIM.', 422);
         }
 
         $session = $this->createOrReuseTopupSession($link, $simcard, $matchedPlan, $packageCode);
@@ -261,24 +270,13 @@ class TopupService
         return [$link, $simcard, $iccid];
     }
 
-    private function listPlansForResolve(Simcard $simcard, ?string $iccid): array
+    private function listTopupPlansForIccid(Simcard $simcard, string $iccid): array
     {
-        $filters = [];
-
-        if ($iccid !== null && trim($iccid) !== '') {
-            $filters['iccid'] = $iccid;
-        } elseif (is_string($simcard->package_code) && trim($simcard->package_code) !== '') {
-            // Fallback for newly issued/pending eSIMs where ICCID has not been stored yet.
-            // This lets the top-up page resolve instead of returning 409.
-            $filters['packageCode'] = (string) $simcard->package_code;
-        }
-
         try {
-            return $this->provider->listPlans($filters);
+            return $this->provider->listTopupPlans($iccid);
         } catch (Throwable $exception) {
-            Log::warning('Could not list top-up plans while resolving top-up link.', [
+            Log::warning('Could not list provider top-up plans for eSIM.', [
                 'simcard_id' => $simcard->id,
-                'has_iccid' => $iccid !== null,
                 'package_code' => $simcard->package_code,
                 'exception' => basename(str_replace('\\', '/', get_class($exception))),
             ]);

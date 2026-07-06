@@ -68,6 +68,33 @@ class EsimaccessProvider implements EsimProvider
         return $response->json();
     }
 
+
+    public function listTopupPlans(string $iccid): array
+    {
+        $iccid = trim($iccid);
+
+        if ($iccid === '') {
+            throw new \InvalidArgumentException('ICCID is required for top-up package list.');
+        }
+
+        // eSIMAccess returns top-up-compatible packages when package/list is queried with ICCID.
+        // Do not include locationCode/type/packageCode here; those can make provider return normal
+        // sale packages, which are not necessarily valid for /esim/topup.
+        $payload = [
+            'iccid' => $iccid,
+        ];
+
+        $path = (string) config('services.esimaccess.topup_package_list_path', '/v1/open/package/list');
+        $path = '/' . ltrim($path, '/');
+
+        $response = $this->http()
+            ->withHeaders($this->createHeaders($payload))
+            ->post($this->baseUrl . $path, $payload)
+            ->throw();
+
+        return $response->json();
+    }
+
     public function createOrder(string $packageCode): EsimProviderOrder
     {
         $transactionId = Str::random(16);
