@@ -46,12 +46,9 @@ class TopupService
             throw new RuntimeException('eSIM could not be found.', 404);
         }
 
-        $iccid = $this->decryptIccid($simcard);
-
-        if ($iccid === null) {
-            throw new RuntimeException('Top-up is not ready yet for this eSIM.', 409);
-        }
-
+        // Token creation must not require ICCID.
+        // The app only needs a short top-up link here. ICCID/provider readiness is checked later
+        // when the token is resolved and when the paid top-up is fulfilled.
         $topupUrl = $this->actionLinks->createTopupUrl($simcard, $reason);
         $path = parse_url($topupUrl, PHP_URL_PATH);
         $token = is_string($path) ? basename($path) : '';
