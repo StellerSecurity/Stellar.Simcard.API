@@ -142,14 +142,11 @@ class EsimaccessProvider implements EsimProvider
     {
         $payload = [
             'transactionId' => $transactionId,
-            'packageInfoList' => [[
-                'packageCode' => $packageCode,
-                'count' => 1,
-                'iccid' => $iccid,
-            ]],
+            'iccid' => $iccid,
+            'packageCode' => $packageCode,
         ];
 
-        $path = (string) config('services.esimaccess.topup_path', '/v1/open/esim/order');
+        $path = (string) config('services.esimaccess.topup_path', '/v1/open/esim/topup');
         $path = '/' . ltrim($path, '/');
 
         $response = $this->http()
