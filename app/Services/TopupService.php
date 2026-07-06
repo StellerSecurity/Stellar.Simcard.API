@@ -70,13 +70,15 @@ class TopupService
     {
         [$link, $simcard, $iccid] = $this->resolveValidLink($token);
 
-        $providerPlans = $this->provider->listPlans(['iccid' => $iccid]);
+        $providerPlans = $this->listPlansForResolve($simcard, $iccid);
         $allPlans = $this->normalizeTopupPlans($providerPlans);
-        $currentPlan = $this->findPlanByPackageCode($allPlans, (string) $simcard->package_code);
+        $currentPlan = $this->findPlanByPackageCode($allPlans, (string) $simcard->package_code)
+            ?: $this->fallbackCurrentPlanFromSimcard($simcard);
         $plans = $this->filterPlansForCurrentPackage($allPlans, $currentPlan);
 
         return [
             'token_status' => 'valid',
+            'topup_ready' => $iccid !== null,
             'link' => [
                 'expires_at' => optional($link->expires_at)->toISOString(),
                 'reason' => Arr::get((array) $link->metadata_redacted, 'reason'),
@@ -200,7 +202,7 @@ class TopupService
     }
 
     /**
-     * @return array{0: SimcardActionLink, 1: Simcard, 2: string}
+     * @return array{0: SimcardActionLink, 1: Simcard, 2: string|null}
      */
     private function resolveValidLink(string $token): array
     {
@@ -225,12 +227,63 @@ class TopupService
             throw new RuntimeException('Top-up eSIM could not be found.', 404);
         }
 
+        // Do not hard-fail resolve/token flows when ICCID is not available yet.
+        // ICCID is required only when a paid top-up is fulfilled against the provider.
         $iccid = $this->decryptIccid($simcard);
-        if ($iccid === null) {
-            throw new RuntimeException('Top-up is not ready yet for this eSIM.', 409);
-        }
 
         return [$link, $simcard, $iccid];
+    }
+
+    private function listPlansForResolve(Simcard $simcard, ?string $iccid): array
+    {
+        $filters = [];
+
+        if ($iccid !== null && trim($iccid) !== '') {
+            $filters['iccid'] = $iccid;
+        } elseif (is_string($simcard->package_code) && trim($simcard->package_code) !== '') {
+            // Fallback for newly issued/pending eSIMs where ICCID has not been stored yet.
+            // This lets the top-up page resolve instead of returning 409.
+            $filters['packageCode'] = (string) $simcard->package_code;
+        }
+
+        try {
+            return $this->provider->listPlans($filters);
+        } catch (Throwable $exception) {
+            Log::warning('Could not list top-up plans while resolving top-up link.', [
+                'simcard_id' => $simcard->id,
+                'has_iccid' => $iccid !== null,
+                'package_code' => $simcard->package_code,
+                'exception' => basename(str_replace('\\', '/', get_class($exception))),
+            ]);
+
+            return [];
+        }
+    }
+
+    private function fallbackCurrentPlanFromSimcard(Simcard $simcard): ?array
+    {
+        $packageCode = is_string($simcard->package_code) ? trim($simcard->package_code) : '';
+
+        if ($packageCode === '') {
+            return null;
+        }
+
+        $totalBytes = is_numeric($simcard->total_volume) && (int) $simcard->total_volume > 0
+            ? (int) $simcard->total_volume
+            : null;
+
+        return array_filter([
+            'package_code' => $packageCode,
+            'code' => $packageCode,
+            'sku' => $packageCode,
+            'name' => $packageCode,
+            'package_name' => $packageCode,
+            'data_bytes' => $totalBytes,
+            'data_gb' => $this->bytesToGb($totalBytes),
+            'duration_days' => $simcard->remaining_validity,
+            'validity_days' => $simcard->remaining_validity,
+            'currency' => 'EUR',
+        ], static fn ($value) => $value !== null && $value !== '');
     }
 
     private function createOrReuseTopupSession(SimcardActionLink $link, Simcard $simcard, array $plan, string $packageCode): SimcardTopupSession
