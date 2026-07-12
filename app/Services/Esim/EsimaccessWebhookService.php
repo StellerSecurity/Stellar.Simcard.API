@@ -11,6 +11,8 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use RuntimeException;
+use StellarSecurity\Notifications\DTO\NotificationEvent;
+use StellarSecurity\Notifications\Facades\Notification;
 use Throwable;
 
 class EsimaccessWebhookService
@@ -152,6 +154,12 @@ class EsimaccessWebhookService
 
             if ($sms !== null) {
                 $result['sms'] = $sms;
+            }
+
+            $email = $this->sendWebhookEmailIfNeeded($notifyType, $content, $result);
+
+            if ($email !== null) {
+                $result['email'] = $email;
             }
         }
 
@@ -401,6 +409,153 @@ class EsimaccessWebhookService
         }
 
         return null;
+    }
+
+
+    private function sendWebhookEmailIfNeeded(string $notifyType, array $content, array $result): ?array
+    {
+        $simcardId = $this->nullableString($result['simcard_id'] ?? null);
+        $simcard = $simcardId === null ? null : Simcard::find($simcardId);
+
+        if ($simcard === null) {
+            return [
+                'status' => 'skipped',
+                'reason' => 'missing_simcard',
+            ];
+        }
+
+        $email = $this->resolveSimcardEmail($simcard);
+
+        if ($email === null) {
+            return [
+                'status' => 'skipped',
+                'reason' => 'missing_email',
+            ];
+        }
+
+        $webhookEventId = $this->nullableString($result['webhook_event_id'] ?? null);
+        $emailPayload = $this->emailPayloadForWebhook($notifyType, $content, $simcard, $webhookEventId);
+
+        if ($emailPayload === null) {
+            return null;
+        }
+
+        $event = $emailPayload['event'];
+        $payload = $emailPayload['payload'];
+        $idempotencyKey = 'esim_webhook_email_' . ($webhookEventId ?: hash('sha256', json_encode([$notifyType, $content]))) . '_' . $event;
+
+        try {
+            Notification::send(
+                NotificationEvent::make($event)
+                    ->product('stellar-data')
+                    ->email($email)
+                    ->payload($payload)
+                    ->idempotencyKey($idempotencyKey)
+            );
+
+            Log::info('eSIM webhook email sent.', [
+                'notify_type' => $notifyType,
+                'simcard_id' => (string) $simcard->id,
+                'event' => $event,
+                'has_email' => true,
+                'idempotency_key' => $idempotencyKey,
+            ]);
+
+            return [
+                'status' => 'sent',
+                'event' => $event,
+            ];
+        } catch (Throwable $exception) {
+            Log::warning('Failed to send eSIM webhook email.', [
+                'notify_type' => $notifyType,
+                'simcard_id' => (string) $simcard->id,
+                'event' => $event,
+                'exception' => $this->safeExceptionName($exception),
+            ]);
+
+            return [
+                'status' => 'failed',
+                'reason' => 'notification_email_failed',
+                'event' => $event,
+            ];
+        }
+    }
+
+    /**
+     * @return array{event: string, payload: array}|null
+     */
+    private function emailPayloadForWebhook(string $notifyType, array $content, Simcard $simcard, ?string $webhookEventId): ?array
+    {
+        $packageLabel = $this->resolveSafePackageLabelForSms($content);
+        $basePayload = array_filter([
+            'app_name' => 'Stellar Data',
+            'simcard_id' => (string) $simcard->id,
+            'package_label' => $packageLabel,
+            'manage_url' => 'https://data.stellarsecurity.com/',
+            'support_url' => 'https://stellarsecurity.com/contact-us',
+            'support_email' => 'info@stellarsecurity.com',
+        ], static fn ($value) => $value !== null && $value !== '');
+
+        if ($notifyType === 'DATA_USAGE') {
+            $topupUrl = $this->actionLinks->createTopupUrl($simcard, 'data_low', $webhookEventId);
+
+            return [
+                'event' => 'esim_low_data',
+                'payload' => array_merge($basePayload, array_filter([
+                    'headline' => 'Your eSIM data is running low',
+                    'intro' => 'Your remaining mobile data is low. Add a top-up to stay connected.',
+                    'topup_url' => $topupUrl,
+                    'manage_url' => $topupUrl,
+                    'remaining_bytes' => $this->nullableInt($content['remain'] ?? null),
+                    'total_bytes' => $this->nullableInt($content['totalVolume'] ?? null),
+                    'used_bytes' => $this->nullableInt($content['orderUsage'] ?? null),
+                ], static fn ($value) => $value !== null && $value !== '')),
+            ];
+        }
+
+        if ($notifyType === 'VALIDITY_USAGE') {
+            $topupUrl = $this->actionLinks->createTopupUrl($simcard, 'validity_expiring', $webhookEventId);
+
+            return [
+                'event' => 'esim_expiring_soon',
+                'payload' => array_merge($basePayload, array_filter([
+                    'headline' => 'Your eSIM is expiring soon',
+                    'intro' => 'Your eSIM is close to expiry. Extend it or buy another plan to stay connected.',
+                    'topup_url' => $topupUrl,
+                    'manage_url' => $topupUrl,
+                    'remaining_validity' => $this->nullableInt($content['remain'] ?? null),
+                    'expires_at' => $this->nullableString($content['expiredTime'] ?? null),
+                ], static fn ($value) => $value !== null && $value !== '')),
+            ];
+        }
+
+        return null;
+    }
+
+    private function resolveSimcardEmail(Simcard $simcard): ?string
+    {
+        if (empty($simcard->email_enc)) {
+            return null;
+        }
+
+        try {
+            $email = $this->crypto->decryptEmail((string) $simcard->email_enc);
+        } catch (Throwable $exception) {
+            Log::warning('Could not decrypt simcard email for webhook notification.', [
+                'simcard_id' => (string) $simcard->id,
+                'exception' => $this->safeExceptionName($exception),
+            ]);
+
+            return null;
+        }
+
+        $email = $this->crypto->normalizeEmail($email);
+
+        if ($email === null || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            return null;
+        }
+
+        return $email;
     }
 
     private function safePlanPhraseForSms(array $content): string
