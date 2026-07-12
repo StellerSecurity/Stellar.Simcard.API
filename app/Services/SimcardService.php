@@ -79,7 +79,6 @@ class SimcardService
         ];
     }
 
-
     /** Query provider for usage/status for a given plan_id */
     public function queryStatusByPlanId(string $planId): ?array
     {
@@ -165,6 +164,7 @@ class SimcardService
 
         return [
             'ac' => $esim['ac'] ?? null,
+            'apn' => $esim['apn'] ?? null,
         ];
     }
 }
