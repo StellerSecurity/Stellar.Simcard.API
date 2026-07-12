@@ -35,6 +35,7 @@ class SimcardController extends Controller
             'plan_id'     => ['required', 'string', 'regex:/^\d{16}$/'],
             'packageCode' => ['required', 'string', 'max:64'],
             'user_id'     => ['nullable', 'integer'],
+            'email'       => ['nullable', 'email', 'max:254'],
         ]);
 
         if ($validator->fails()) {
@@ -53,6 +54,8 @@ class SimcardController extends Controller
             accountRef:  null,
             packageCode: $data['packageCode'],
             planId:      $data['plan_id'],
+            email:       $data['email'] ?? null,
+            emailSource: 'simcard_order',
         );
 
         return response()->json([

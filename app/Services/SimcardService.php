@@ -26,16 +26,20 @@ class SimcardService
         int $userId,
         ?string $accountRef,
         string $packageCode,
-        string $planId
+        string $planId,
+        ?string $email = null,
+        ?string $emailSource = 'order'
     ): Simcard {
 
         $planId = preg_replace('/\s+/', '', (string) $planId);
         $planIdHash = $this->crypto->derivePlanHash($planId);
 
-        return DB::transaction(function () use ($planIdHash, $userId, $accountRef, $packageCode, $planId) {
+        return DB::transaction(function () use ($planIdHash, $userId, $accountRef, $packageCode, $planId, $email, $emailSource) {
             // If a record already exists for this plan_id, do not create a new provider order.
             $existing = Simcard::where('plan_id_hash', $planIdHash)->first();
             if ($existing) {
+                $this->storeEmailOnSimcard($existing, $email, $emailSource);
+
                 return $existing;
             }
 
@@ -48,7 +52,7 @@ class SimcardService
 
             $externalOrderIdHash = $this->crypto->deriveExternalOrderHash($order->externalOrderId);
 
-            return Simcard::create([
+            $simcard = Simcard::create([
                 'id'                    => (string) Str::uuid(),
                 'plan_id_hash'          => $planIdHash,
                 'provider'              => 'esimaccess',
@@ -59,6 +63,10 @@ class SimcardService
                 'user_id'               => $userId,
                 'purchased_on'          => now()->toDateString(),
             ]);
+
+            $this->storeEmailOnSimcard($simcard, $email, $emailSource);
+
+            return $simcard;
         });
     }
 
@@ -67,9 +75,18 @@ class SimcardService
         int $userId,
         ?string $accountRef,
         string $packageCode,
-        string $planId
+        string $planId,
+        ?string $email = null,
+        ?string $emailSource = 'order'
     ): array {
-        $simcard = $this->orderEsim($userId, $accountRef, $packageCode, $planId);
+        $simcard = $this->orderEsim(
+            userId: $userId,
+            accountRef: $accountRef,
+            packageCode: $packageCode,
+            planId: $planId,
+            email: $email,
+            emailSource: $emailSource,
+        );
 
         $install = $this->fetchInstallInfoWithRetry($planId);
 
@@ -87,7 +104,7 @@ class SimcardService
 
         $simcard = Simcard::where('plan_id_hash', $planIdHash)->first();
 
-        if(!$simcard) {
+        if (!$simcard) {
             return null;
         }
 
@@ -122,6 +139,32 @@ class SimcardService
         ];
     }
 
+    /** Store/update nullable encrypted customer email for service/top-up notifications. */
+    public function storeEmailOnSimcard(Simcard $simcard, ?string $email, ?string $emailSource = 'order'): void
+    {
+        $normalizedEmail = $this->crypto->normalizeEmail($email);
+
+        if ($normalizedEmail === null) {
+            return;
+        }
+
+        $simcard->email_enc = $this->crypto->encryptEmail($normalizedEmail);
+        $simcard->email_hash = $this->crypto->deriveEmailHash($normalizedEmail);
+        $simcard->email_opt_in_at = $simcard->email_opt_in_at ?? now();
+        $simcard->email_source = $emailSource ?: 'order';
+        $simcard->save();
+    }
+
+    /** Decrypt customer email for notification sending. Never expose this in normal API responses. */
+    public function decryptSimcardEmail(Simcard $simcard): ?string
+    {
+        if (!$simcard->email_enc) {
+            return null;
+        }
+
+        return $this->crypto->decryptEmail($simcard->email_enc);
+    }
+
     /** Fetch install payload (AC) with a short retry loop */
     private function fetchInstallInfoWithRetry(string $planId): array
     {
@@ -154,6 +197,7 @@ class SimcardService
 
         return [
             'ac' => null,
+            'apn' => null,
         ];
     }
 
@@ -162,9 +206,37 @@ class SimcardService
     {
         $esim = $provider['obj']['esimList'][0] ?? null;
 
+        if (!is_array($esim)) {
+            return [
+                'ac' => null,
+                'apn' => null,
+            ];
+        }
+
         return [
             'ac' => $esim['ac'] ?? null,
-            'apn' => $esim['apn'] ?? null,
+            'apn' => $this->extractApn($esim),
         ];
+    }
+
+    private function extractApn(array $esim): ?string
+    {
+        $candidates = [
+            $esim['apn'] ?? null,
+            $esim['apnValue'] ?? null,
+            $esim['accessPointName'] ?? null,
+            $esim['installation']['apn'] ?? null,
+            $esim['install']['apn'] ?? null,
+            $esim['profile']['apn'] ?? null,
+            $esim['packageList'][0]['apn'] ?? null,
+        ];
+
+        foreach ($candidates as $candidate) {
+            if (is_string($candidate) && trim($candidate) !== '') {
+                return trim($candidate);
+            }
+        }
+
+        return null;
     }
 }

@@ -16,6 +16,7 @@ class Simcard extends Model
         'expires_at' => 'datetime',
         'activated_at' => 'datetime',
         'last_webhook_at' => 'datetime',
+        'email_opt_in_at' => 'datetime',
     ];
 
     protected $fillable = [
@@ -40,6 +41,10 @@ class Simcard extends Model
         'activated_at',
         'last_webhook_at',
         'user_id',
+        'email_enc',
+        'email_hash',
+        'email_opt_in_at',
+        'email_source',
         'purchased_on'
     ];
 
@@ -49,5 +54,7 @@ class Simcard extends Model
         'iccid_enc',
         'iccid_hash',
         'plan_id_hash',
+        'email_enc',
+        'email_hash',
     ];
 }

@@ -65,6 +65,58 @@ class EsimCryptoService
         return $this->deriveSensitiveValueHash($iccid, 'iccid');
     }
 
+
+    /**
+     * Normalizes an optional customer email before encryption/hash storage.
+     */
+    public function normalizeEmail(?string $email): ?string
+    {
+        $email = trim((string) $email);
+
+        if ($email === '') {
+            return null;
+        }
+
+        return strtolower($email);
+    }
+
+    /**
+     * Derives a stable, non-reversible hash of an email for lookups/dedupe.
+     * The plaintext email is never stored.
+     */
+    public function deriveEmailHash(string $email): string
+    {
+        $email = $this->normalizeEmail($email);
+
+        if ($email === null) {
+            throw new RuntimeException('Cannot hash an empty email.');
+        }
+
+        return $this->deriveSensitiveValueHash($email, 'simcard_customer_email');
+    }
+
+    /**
+     * Encrypts a normalized email using the recoverable sensitive-value key.
+     */
+    public function encryptEmail(string $email): string
+    {
+        $email = $this->normalizeEmail($email);
+
+        if ($email === null) {
+            throw new RuntimeException('Cannot encrypt an empty email.');
+        }
+
+        return $this->encryptSensitiveValue($email);
+    }
+
+    /**
+     * Decrypts an email encrypted with encryptEmail().
+     */
+    public function decryptEmail(string $encodedCiphertext): string
+    {
+        return $this->decryptSensitiveValue($encodedCiphertext);
+    }
+
     /**
      * Derives a stable, non-reversible hash of provider transaction identifiers.
      */
