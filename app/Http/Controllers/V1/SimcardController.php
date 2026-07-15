@@ -34,8 +34,12 @@ class SimcardController extends Controller
         $validator = Validator::make($request->all(), [
             'plan_id'     => ['required', 'string', 'regex:/^\d{16}$/'],
             'packageCode' => ['required', 'string', 'max:64'],
-            'user_id'     => ['nullable', 'integer'],
-            'email'       => ['nullable', 'email', 'max:254'],
+            'user_id'                => ['nullable', 'integer'],
+            'email'                  => ['nullable', 'email', 'max:254'],
+            'commerce_order_id'      => ['nullable', 'string', 'max:64'],
+            'commerce_order_item_id' => ['nullable', 'string', 'max:64'],
+            'commerce_unit'          => ['nullable', 'integer', 'min:1', 'max:99'],
+            'idempotency_key'        => ['nullable', 'string', 'max:128'],
         ]);
 
         if ($validator->fails()) {
@@ -56,6 +60,10 @@ class SimcardController extends Controller
             planId:      $data['plan_id'],
             email:       $data['email'] ?? null,
             emailSource: 'simcard_order',
+            commerceOrderId: $data['commerce_order_id'] ?? null,
+            commerceOrderItemId: $data['commerce_order_item_id'] ?? null,
+            commerceUnit: isset($data['commerce_unit']) ? (int) $data['commerce_unit'] : null,
+            idempotencyKey: $data['idempotency_key'] ?? null,
         );
 
         return response()->json([

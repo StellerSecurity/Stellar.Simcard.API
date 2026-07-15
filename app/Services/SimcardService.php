@@ -28,17 +28,33 @@ class SimcardService
         string $packageCode,
         string $planId,
         ?string $email = null,
-        ?string $emailSource = 'order'
+        ?string $emailSource = 'order',
+        ?string $commerceOrderId = null,
+        ?string $commerceOrderItemId = null,
+        ?int $commerceUnit = null,
+        ?string $idempotencyKey = null
     ): Simcard {
 
         $planId = preg_replace('/\s+/', '', (string) $planId);
         $planIdHash = $this->crypto->derivePlanHash($planId);
+        $commerceOrderId = $this->normalizeNullableIdentifier($commerceOrderId);
+        $commerceOrderItemId = $this->normalizeNullableIdentifier($commerceOrderItemId);
+        $commerceUnit = $commerceUnit !== null && $commerceUnit > 0 ? $commerceUnit : null;
+        $idempotencyKey = $this->normalizeNullableIdentifier($idempotencyKey);
 
-        return DB::transaction(function () use ($planIdHash, $userId, $accountRef, $packageCode, $planId, $email, $emailSource) {
-            // If a record already exists for this plan_id, do not create a new provider order.
-            $existing = Simcard::where('plan_id_hash', $planIdHash)->first();
+        return DB::transaction(function () use ($planIdHash, $userId, $accountRef, $packageCode, $planId, $email, $emailSource, $commerceOrderId, $commerceOrderItemId, $commerceUnit, $idempotencyKey) {
+            // If Commerce retries the same paid order item, do not create a second provider order.
+            $existing = $this->findExistingSimcardForOrderRequest(
+                planIdHash: $planIdHash,
+                commerceOrderId: $commerceOrderId,
+                commerceOrderItemId: $commerceOrderItemId,
+                commerceUnit: $commerceUnit,
+                idempotencyKey: $idempotencyKey,
+            );
+
             if ($existing) {
                 $this->storeEmailOnSimcard($existing, $email, $emailSource);
+                $this->attachCommerceIdempotencyMetadata($existing, $commerceOrderId, $commerceOrderItemId, $commerceUnit, $idempotencyKey);
 
                 return $existing;
             }
@@ -59,9 +75,13 @@ class SimcardService
                 'package_code'          => $packageCode,
                 'external_order_id_enc'  => $externalOrderIdEnc,
                 'external_order_id_hash' => $externalOrderIdHash,
-                'state'                 => 'pending',
-                'user_id'               => $userId,
-                'purchased_on'          => now()->toDateString(),
+                'state'                  => 'pending',
+                'user_id'                => $userId,
+                'commerce_order_id'      => $commerceOrderId,
+                'commerce_order_item_id' => $commerceOrderItemId,
+                'commerce_unit'          => $commerceUnit,
+                'idempotency_key'        => $idempotencyKey,
+                'purchased_on'           => now()->toDateString(),
             ]);
 
             $this->storeEmailOnSimcard($simcard, $email, $emailSource);
@@ -77,7 +97,11 @@ class SimcardService
         string $packageCode,
         string $planId,
         ?string $email = null,
-        ?string $emailSource = 'order'
+        ?string $emailSource = 'order',
+        ?string $commerceOrderId = null,
+        ?string $commerceOrderItemId = null,
+        ?int $commerceUnit = null,
+        ?string $idempotencyKey = null
     ): array {
         $simcard = $this->orderEsim(
             userId: $userId,
@@ -86,6 +110,10 @@ class SimcardService
             planId: $planId,
             email: $email,
             emailSource: $emailSource,
+            commerceOrderId: $commerceOrderId,
+            commerceOrderItemId: $commerceOrderItemId,
+            commerceUnit: $commerceUnit,
+            idempotencyKey: $idempotencyKey,
         );
 
         $install = $this->fetchInstallInfoWithRetry($planId);
@@ -137,6 +165,86 @@ class SimcardService
             'simcard'  => $simcard,
             'provider' => $safeProvider,
         ];
+    }
+
+    private function findExistingSimcardForOrderRequest(
+        string $planIdHash,
+        ?string $commerceOrderId,
+        ?string $commerceOrderItemId,
+        ?int $commerceUnit,
+        ?string $idempotencyKey
+    ): ?Simcard {
+        if ($idempotencyKey !== null) {
+            $existing = Simcard::query()
+                ->where('idempotency_key', $idempotencyKey)
+                ->lockForUpdate()
+                ->first();
+
+            if ($existing) {
+                return $existing;
+            }
+        }
+
+        if ($commerceOrderId !== null && $commerceOrderItemId !== null && $commerceUnit !== null) {
+            $existing = Simcard::query()
+                ->where('commerce_order_id', $commerceOrderId)
+                ->where('commerce_order_item_id', $commerceOrderItemId)
+                ->where('commerce_unit', $commerceUnit)
+                ->lockForUpdate()
+                ->first();
+
+            if ($existing) {
+                return $existing;
+            }
+        }
+
+        // Backward-compatible idempotency. Commerce now persists/reuses the same
+        // plan_id across queue retries, so this also prevents duplicates.
+        return Simcard::query()
+            ->where('plan_id_hash', $planIdHash)
+            ->lockForUpdate()
+            ->first();
+    }
+
+    private function attachCommerceIdempotencyMetadata(
+        Simcard $simcard,
+        ?string $commerceOrderId,
+        ?string $commerceOrderItemId,
+        ?int $commerceUnit,
+        ?string $idempotencyKey
+    ): void {
+        $changed = false;
+
+        if ($commerceOrderId !== null && empty($simcard->commerce_order_id)) {
+            $simcard->commerce_order_id = $commerceOrderId;
+            $changed = true;
+        }
+
+        if ($commerceOrderItemId !== null && empty($simcard->commerce_order_item_id)) {
+            $simcard->commerce_order_item_id = $commerceOrderItemId;
+            $changed = true;
+        }
+
+        if ($commerceUnit !== null && empty($simcard->commerce_unit)) {
+            $simcard->commerce_unit = $commerceUnit;
+            $changed = true;
+        }
+
+        if ($idempotencyKey !== null && empty($simcard->idempotency_key)) {
+            $simcard->idempotency_key = $idempotencyKey;
+            $changed = true;
+        }
+
+        if ($changed) {
+            $simcard->save();
+        }
+    }
+
+    private function normalizeNullableIdentifier(?string $value): ?string
+    {
+        $value = trim((string) $value);
+
+        return $value !== '' ? $value : null;
     }
 
     /** Store/update nullable encrypted customer email for service/top-up notifications. */

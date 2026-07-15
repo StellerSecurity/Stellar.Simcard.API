@@ -220,9 +220,31 @@ class TopupService
                 'supplier_reference' => $supplierReference,
             ];
         } catch (Throwable $exception) {
-            $session->status = self::STATUS_FAILED;
             $session->commerce_order_id = $commerceOrderId ?: $session->commerce_order_id;
             $session->commerce_order_item_id = $commerceOrderItemId ?: $session->commerce_order_item_id;
+
+            if ($this->isRetryableProviderException($exception)) {
+                // Do not permanently fail paid top-ups on provider/network timeouts.
+                // Commerce can retry with the same provider transaction id.
+                $session->failure_reason = 'Retryable top-up fulfillment error: ' . $exception->getMessage();
+                $session->meta = array_merge((array) $session->meta, [
+                    'provider_transaction_id' => $transactionId,
+                    'last_retryable_error' => $exception->getMessage(),
+                    'last_retryable_error_at' => now()->toIso8601String(),
+                ]);
+                $session->save();
+
+                Log::warning('Supplier top-up fulfillment retryable failure.', [
+                    'topup_session_id' => $session->id,
+                    'simcard_id' => $simcard->id,
+                    'package_code' => $session->package_code,
+                    'exception' => basename(str_replace('\\', '/', get_class($exception))),
+                ]);
+
+                throw new RuntimeException('Top-up fulfillment temporarily unavailable: ' . $exception->getMessage(), 503);
+            }
+
+            $session->status = self::STATUS_FAILED;
             $session->supplier_reference = null;
             $session->fulfilled_at = null;
             $session->failure_reason = $exception->getMessage();
@@ -464,6 +486,32 @@ class TopupService
 
             throw new RuntimeException('Top-up checkout could not be created.', 502);
         }
+    }
+
+    private function isRetryableProviderException(Throwable $exception): bool
+    {
+        $message = strtolower($exception->getMessage());
+
+        foreach ([
+            'curl error 28',
+            'connection timeout',
+            'operation timed out',
+            'timeout was reached',
+            'failed to connect',
+            'could not resolve host',
+            'connection refused',
+            'connection reset',
+            'temporary failure',
+            'temporarily unavailable',
+            'service unavailable',
+            'http 503',
+        ] as $needle) {
+            if (str_contains($message, $needle)) {
+                return true;
+            }
+        }
+
+        return $exception instanceof ConnectionException;
     }
 
     private function normalizeToken(string $token): string
