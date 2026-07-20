@@ -22,6 +22,7 @@ class Simcard extends Model
     protected $fillable = [
         'plan_id_hash',
         'provider',
+        'provider_account',
         'package_code',
         'external_order_id_enc',
         'external_order_id_hash',

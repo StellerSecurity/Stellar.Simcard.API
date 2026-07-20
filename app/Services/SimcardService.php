@@ -59,7 +59,7 @@ class SimcardService
                 return $existing;
             }
 
-            $order = $this->provider->createOrder($packageCode);
+            $order = $this->provider->createOrder($packageCode, 'primary');
 
             $externalOrderIdEnc = $this->crypto->encryptForPlan(
                 $planId,
@@ -72,6 +72,7 @@ class SimcardService
                 'id'                    => (string) Str::uuid(),
                 'plan_id_hash'          => $planIdHash,
                 'provider'              => 'esimaccess',
+                'provider_account'      => 'primary',
                 'package_code'          => $packageCode,
                 'external_order_id_enc'  => $externalOrderIdEnc,
                 'external_order_id_hash' => $externalOrderIdHash,
@@ -142,7 +143,7 @@ class SimcardService
         );
 
 
-        $provider = $this->provider->queryOrder($externalOrderId);
+        $provider = $this->provider->queryOrder($externalOrderId, $this->preferredProviderAccount($simcard));
 
         // Extract the first eSIM entry if present.
         $esim = $provider['obj']['esimList'][0] ?? null;
@@ -286,7 +287,7 @@ class SimcardService
         );
 
         for ($i = 0; $i < 10; $i++) {
-            $provider = $this->provider->queryOrder($externalOrderId);
+            $provider = $this->provider->queryOrder($externalOrderId, $this->preferredProviderAccount($simcard));
 
             $install = $this->buildInstallPayload($provider);
 
@@ -307,6 +308,13 @@ class SimcardService
             'ac' => null,
             'apn' => null,
         ];
+    }
+
+    private function preferredProviderAccount(Simcard $simcard): string
+    {
+        return in_array($simcard->provider_account, ['primary', 'legacy'], true)
+            ? $simcard->provider_account
+            : 'legacy';
     }
 
     /** Build install payload from provider response */

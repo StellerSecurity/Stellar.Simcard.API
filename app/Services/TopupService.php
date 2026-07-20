@@ -101,7 +101,8 @@ class TopupService
         }
 
         $currentPlan = $this->currentPlanForSimcard($simcard);
-        $providerPlans = $this->provider->listPlans(['iccid' => $iccid]);
+        $account = $this->resolveProviderAccount($simcard, $iccid);
+        $providerPlans = $this->provider->listPlans(['iccid' => $iccid], $account);
         $plans = $this->filterPlansForCurrentPackage(
             $this->normalizeTopupPlans($providerPlans),
             $currentPlan
@@ -173,7 +174,9 @@ class TopupService
         $transactionId = $this->providerTransactionId($session);
 
         try {
-            $providerResponse = $this->provider->topup($iccid, (string) $session->package_code, $transactionId);
+            // Resolve ownership with a read-only request, then execute the paid top-up once.
+            $account = $this->resolveProviderAccount($simcard, $iccid);
+            $providerResponse = $this->provider->topup($iccid, (string) $session->package_code, $transactionId, $account);
             $redactedProviderResponse = $this->redactProviderPayload($providerResponse);
 
             if (! $this->providerTopupSucceeded($providerResponse)) {
@@ -308,7 +311,8 @@ class TopupService
         $filters['iccid'] = $iccid;
 
         try {
-            return $this->provider->listPlans($filters);
+            $account = $this->resolveProviderAccount($simcard, $iccid);
+            return $this->provider->listPlans($filters, $account);
         } catch (Throwable $exception) {
             Log::warning('Could not list top-up plans while resolving top-up link.', [
                 'simcard_id' => $simcard->id,
@@ -327,7 +331,7 @@ class TopupService
 
         if ($packageCode !== '') {
             try {
-                $response = $this->provider->listPlans(['packageCode' => $packageCode]);
+                $response = $this->provider->listPlans(['packageCode' => $packageCode], $this->preferredProviderAccount($simcard));
                 $packages = $this->extractPackageList($response);
 
                 foreach ($packages as $package) {
@@ -622,6 +626,25 @@ class TopupService
         }
 
         return $payload;
+    }
+
+    private function preferredProviderAccount(Simcard $simcard): string
+    {
+        return in_array($simcard->provider_account, ['primary', 'legacy'], true)
+            ? $simcard->provider_account
+            : 'legacy';
+    }
+
+    private function resolveProviderAccount(Simcard $simcard, string $iccid): string
+    {
+        $resolved = $this->provider->resolveAccountForEsim(null, $iccid, $this->preferredProviderAccount($simcard));
+
+        if ($resolved !== $simcard->provider_account) {
+            $simcard->provider_account = $resolved;
+            $simcard->save();
+        }
+
+        return $resolved;
     }
 
     private function normalizeTopupPlans(array $providerResponse): array

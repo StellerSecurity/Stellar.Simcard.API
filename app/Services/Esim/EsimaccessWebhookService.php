@@ -369,7 +369,7 @@ class EsimaccessWebhookService
         }
 
         try {
-            $this->provider->sendSms($iccid, $message);
+            $this->provider->sendSms($iccid, $message, $this->preferredProviderAccount($simcard));
 
             return [
                 'status' => 'sent',
@@ -486,7 +486,7 @@ class EsimaccessWebhookService
      */
     private function emailPayloadForWebhook(string $notifyType, array $content, Simcard $simcard, ?string $webhookEventId): ?array
     {
-        $packageLabel = $this->resolveSafePackageLabelForSms($content);
+        $packageLabel = $this->resolveSafePackageLabelForSms($content, $simcard);
         $basePayload = array_filter([
             'app_name' => 'Stellar Data',
             'simcard_id' => (string) $simcard->id,
@@ -560,12 +560,12 @@ class EsimaccessWebhookService
 
     private function safePlanPhraseForSms(array $content): string
     {
-        $label = $this->resolveSafePackageLabelForSms($content);
+        $label = $this->resolveSafePackageLabelForSms($content, $simcard);
 
         return $label === null ? '' : ' for ' . $label;
     }
 
-    private function resolveSafePackageLabelForSms(array $content): ?string
+    private function resolveSafePackageLabelForSms(array $content, Simcard $simcard): ?string
     {
         $orderNo = $this->nullableString($content['orderNo'] ?? null);
         $iccid = $this->nullableString($content['iccid'] ?? null);
@@ -575,7 +575,7 @@ class EsimaccessWebhookService
         }
 
         try {
-            $response = $this->provider->queryEsim($orderNo, $iccid);
+            $response = $this->provider->queryEsim($orderNo, $iccid, $this->preferredProviderAccount($simcard));
             $candidate = $this->extractPackageLabelFromProviderResponse($response);
 
             return $this->sanitizePackageLabelForSms($candidate);
@@ -586,6 +586,13 @@ class EsimaccessWebhookService
 
             return null;
         }
+    }
+
+    private function preferredProviderAccount(Simcard $simcard): string
+    {
+        return in_array($simcard->provider_account, ['primary', 'legacy'], true)
+            ? $simcard->provider_account
+            : 'legacy';
     }
 
     private function extractPackageLabelFromProviderResponse(array $response): ?string

@@ -19,11 +19,19 @@ return [
     ],
 
     'esimaccess' => [
-        'base_url'    => env('ESIMACCESS_BASE_URL'),
-        'access_code' => env('ESIMACCESS_ACCESS_CODE'),
-        'secret_key'  => env('ESIMACCESS_SECRET_KEY'),
-        'topup_path'  => env('ESIMACCESS_TOPUP_PATH', '/v1/open/esim/topup'),
+        'base_url' => env('ESIMACCESS_BASE_URL'),
+        'topup_path' => env('ESIMACCESS_TOPUP_PATH', '/v1/open/esim/topup'),
         'webhook_secret' => env('ESIMACCESS_WEBHOOK_SECRET'),
+        'accounts' => [
+            'primary' => [
+                'access_code' => env('ESIMACCESS_ACCESS_CODE'),
+                'secret_key' => env('ESIMACCESS_SECRET_KEY'),
+            ],
+            'legacy' => [
+                'access_code' => env('ESIMACCESS_LEGACY_ACCESS_CODE'),
+                'secret_key' => env('ESIMACCESS_LEGACY_SECRET_KEY'),
+            ],
+        ],
     ],
 
     'stellar_data' => [
