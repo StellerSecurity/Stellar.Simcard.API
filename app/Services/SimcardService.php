@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Simcard;
 use App\Services\Esim\EsimCryptoService;
+use App\Services\Esim\EsimMarketingRefundOfferService;
 use App\Services\Esim\EsimProvider;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -13,6 +14,7 @@ class SimcardService
     public function __construct(
         private readonly EsimProvider $provider,
         private readonly EsimCryptoService $crypto,
+        private readonly EsimMarketingRefundOfferService $marketingRefundOffer,
     ) {}
 
     /** Fetch plan list from provider */
@@ -158,9 +160,18 @@ class SimcardService
                 : null,
             'esim_status'     => $esim['esimStatus'] ?? null,
             'smdp_status'     => $esim['smdpStatus'] ?? null,
-            'esim_tran_no'     => $esim['esimTranNo'] ?? null,
-            'location_codes'    => $esim['packageList'][0]['locationCode'] ?? null,
+            'esim_tran_no'    => $esim['esimTranNo'] ?? null,
+            'location_codes'  => $esim['packageList'][0]['locationCode'] ?? null,
         ];
+
+        $isInUse = strtoupper(trim((string) ($safeProvider['esim_status'] ?? ''))) === 'IN_USE';
+        $hasUsage = is_numeric($safeProvider['used_bytes'] ?? null)
+            && (int) $safeProvider['used_bytes'] > 0;
+
+        if ($isInUse || $hasUsage) {
+            $this->marketingRefundOffer->handleUsageDetected($simcard);
+            $simcard->refresh();
+        }
 
         return [
             'simcard'  => $simcard,

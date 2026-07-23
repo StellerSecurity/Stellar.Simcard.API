@@ -34,6 +34,7 @@ class EsimaccessWebhookService
         private readonly EsimCryptoService $crypto,
         private readonly EsimProvider $provider,
         private readonly SimcardActionLinkService $actionLinks,
+        private readonly EsimMarketingRefundOfferService $marketingRefundOffer,
     ) {}
 
     public function handle(array $payload): array
@@ -150,6 +151,8 @@ class EsimaccessWebhookService
         });
 
         if (($result['status'] ?? null) === 'processed') {
+            $this->queueMarketingRefundOfferIfUsageDetected($notifyType, $content, $result);
+
             $sms = $this->sendWebhookSmsIfNeeded($notifyType, $content, $result);
 
             if ($sms !== null) {
@@ -164,6 +167,26 @@ class EsimaccessWebhookService
         }
 
         return $result;
+    }
+
+    private function queueMarketingRefundOfferIfUsageDetected(string $notifyType, array $content, array $result): void
+    {
+        $esimStatus = strtoupper(trim((string) ($content['esimStatus'] ?? '')));
+        $orderUsage = $this->nullableInt($content['orderUsage'] ?? null);
+
+        $usageDetected = ($notifyType === 'ESIM_STATUS' && $esimStatus === 'IN_USE')
+            || ($notifyType === 'DATA_USAGE' && $orderUsage !== null && $orderUsage > 0);
+
+        if (!$usageDetected) {
+            return;
+        }
+
+        $simcardId = $this->nullableString($result['simcard_id'] ?? null);
+        $simcard = $simcardId === null ? null : Simcard::find($simcardId);
+
+        if ($simcard !== null) {
+            $this->marketingRefundOffer->handleUsageDetected($simcard);
+        }
     }
 
     private function handleHealthCheck(array $normalized, string $idempotencyKey): array
@@ -306,6 +329,7 @@ class EsimaccessWebhookService
     private function applyEsimStatus(Simcard $simcard, array $content): void
     {
         $esimStatus = $this->nullableString($content['esimStatus'] ?? null);
+        $esimStatus = $esimStatus === null ? null : strtoupper($esimStatus);
         $smdpStatus = $this->nullableString($content['smdpStatus'] ?? null);
 
         if ($esimStatus !== null) {
