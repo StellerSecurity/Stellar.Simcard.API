@@ -72,10 +72,38 @@ class TopupService
 
         $currentPlan = $this->currentPlanForSimcard($simcard);
         $providerPlans = $this->listPlansForResolve($simcard, $iccid);
+
+        $normalizedPlans = $this->normalizeTopupPlans($providerPlans);
+
+        Log::info('Top-up resolve plan pipeline.', [
+            'simcard_id' => (string) $simcard->id,
+            'provider' => (string) $simcard->provider,
+            'provider_account' => (string) $simcard->provider_account,
+            'package_code' => (string) $simcard->package_code,
+            'has_iccid' => $iccid !== null && trim($iccid) !== '',
+            'provider_response_keys' => array_keys($providerPlans),
+            'provider_response_shape' => $this->describeArrayShape($providerPlans),
+            'extracted_package_count' => count($this->extractPackageList($providerPlans)),
+            'normalized_plan_count' => count($normalizedPlans),
+            'current_plan_found' => $currentPlan !== null,
+            'current_plan_location_code' => $currentPlan !== null ? $this->planLocationCode($currentPlan) : null,
+            'current_plan_location' => $currentPlan !== null ? $this->normalizeLocationList($currentPlan) : [],
+        ]);
+
         $plans = $this->filterPlansForCurrentPackage(
-            $this->normalizeTopupPlans($providerPlans),
+            $normalizedPlans,
             $currentPlan
         );
+
+        Log::info('Top-up resolve plans filtered.', [
+            'simcard_id' => (string) $simcard->id,
+            'normalized_plan_count' => count($normalizedPlans),
+            'filtered_plan_count' => count($plans),
+            'filtered_package_codes' => array_values(array_filter(array_map(
+                static fn (array $plan): ?string => isset($plan['package_code']) ? (string) $plan['package_code'] : null,
+                $plans
+            ))),
+        ]);
 
         return [
             'token_status' => 'valid',
@@ -302,23 +330,61 @@ class TopupService
 
     private function listPlansForResolve(Simcard $simcard, ?string $iccid): array
     {
-        $filters = [];
-
         if ($iccid === null || trim($iccid) === '') {
+            Log::warning('Top-up provider plan lookup skipped because ICCID is unavailable.', [
+                'simcard_id' => (string) $simcard->id,
+                'provider' => (string) $simcard->provider,
+                'provider_account' => (string) $simcard->provider_account,
+                'package_code' => (string) $simcard->package_code,
+                'has_iccid' => false,
+            ]);
+
             return [];
         }
 
-        $filters['iccid'] = $iccid;
-
         try {
             $account = $this->resolveProviderAccount($simcard, $iccid);
-            return $this->provider->listPlans($filters, $account);
+
+            Log::info('Requesting top-up plans from provider.', [
+                'simcard_id' => (string) $simcard->id,
+                'provider' => (string) $simcard->provider,
+                'resolved_provider_account' => $account,
+                'package_code' => (string) $simcard->package_code,
+                'has_iccid' => true,
+                'iccid_last4' => strlen($iccid) >= 4 ? substr($iccid, -4) : null,
+                'filter_keys' => ['iccid'],
+            ]);
+
+            $response = $this->provider->listPlans(['iccid' => $iccid], $account);
+
+            Log::info('Provider top-up plan response received.', [
+                'simcard_id' => (string) $simcard->id,
+                'resolved_provider_account' => $account,
+                'response_keys' => array_keys($response),
+                'response_shape' => $this->describeArrayShape($response),
+                'success' => Arr::get($response, 'success'),
+                'error_code' => Arr::get($response, 'errorCode') ?? Arr::get($response, 'code'),
+                'error_message' => Arr::get($response, 'errorMsg') ?? Arr::get($response, 'message'),
+                'obj_package_list_type' => get_debug_type(Arr::get($response, 'obj.packageList')),
+                'obj_package_list_count' => is_array(Arr::get($response, 'obj.packageList'))
+                    ? count(Arr::get($response, 'obj.packageList'))
+                    : null,
+                'data_obj_package_list_type' => get_debug_type(Arr::get($response, 'data.obj.packageList')),
+                'data_obj_package_list_count' => is_array(Arr::get($response, 'data.obj.packageList'))
+                    ? count(Arr::get($response, 'data.obj.packageList'))
+                    : null,
+            ]);
+
+            return $response;
         } catch (Throwable $exception) {
             Log::warning('Could not list top-up plans while resolving top-up link.', [
-                'simcard_id' => $simcard->id,
-                'has_iccid' => $iccid !== null,
-                'package_code' => $simcard->package_code,
-                'exception' => basename(str_replace('\\', '/', get_class($exception))),
+                'simcard_id' => (string) $simcard->id,
+                'has_iccid' => true,
+                'iccid_last4' => strlen($iccid) >= 4 ? substr($iccid, -4) : null,
+                'package_code' => (string) $simcard->package_code,
+                'exception_class' => get_class($exception),
+                'exception_message' => $exception->getMessage(),
+                'exception_code' => $exception->getCode(),
             ]);
 
             return [];
@@ -497,19 +563,19 @@ class TopupService
         $message = strtolower($exception->getMessage());
 
         foreach ([
-            'curl error 28',
-            'connection timeout',
-            'operation timed out',
-            'timeout was reached',
-            'failed to connect',
-            'could not resolve host',
-            'connection refused',
-            'connection reset',
-            'temporary failure',
-            'temporarily unavailable',
-            'service unavailable',
-            'http 503',
-        ] as $needle) {
+                     'curl error 28',
+                     'connection timeout',
+                     'operation timed out',
+                     'timeout was reached',
+                     'failed to connect',
+                     'could not resolve host',
+                     'connection refused',
+                     'connection reset',
+                     'temporary failure',
+                     'temporarily unavailable',
+                     'service unavailable',
+                     'http 503',
+                 ] as $needle) {
             if (str_contains($message, $needle)) {
                 return true;
             }
@@ -652,6 +718,10 @@ class TopupService
         $packages = $this->extractPackageList($providerResponse);
         $plans = [];
 
+        Log::info('Normalizing provider top-up packages.', [
+            'package_count' => count($packages),
+        ]);
+
         foreach ($packages as $package) {
             if (! is_array($package)) {
                 continue;
@@ -670,6 +740,11 @@ class TopupService
                 $topupValue = $slug;
                 $topupValueType = 'slug';
             } else {
+                Log::debug('Provider package skipped because no top-up value or slug was found.', [
+                    'provider_sale_package_code' => $providerSalePackageCode,
+                    'package_keys' => array_keys($package),
+                ]);
+
                 // Normal sale codes like CKH166 / CKH082 / CKH168 are not valid recharge values.
                 continue;
             }
@@ -688,6 +763,15 @@ class TopupService
 
             $plans[] = array_filter($plan, static fn ($value) => $value !== null && $value !== '');
         }
+
+        Log::info('Provider top-up packages normalized.', [
+            'input_package_count' => count($packages),
+            'output_plan_count' => count($plans),
+            'output_package_codes' => array_values(array_filter(array_map(
+                static fn (array $plan): ?string => isset($plan['package_code']) ? (string) $plan['package_code'] : null,
+                $plans
+            ))),
+        ]);
 
         return array_values($plans);
     }
@@ -763,25 +847,76 @@ class TopupService
 
     private function extractPackageList(array $response): array
     {
-        $candidates = [
-            Arr::get($response, 'obj.packageList'),
-            Arr::get($response, 'obj.packageList.data'),
-            Arr::get($response, 'obj.packages'),
-            Arr::get($response, 'data.packageList'),
-            Arr::get($response, 'data.packages'),
-            Arr::get($response, 'packageList'),
-            Arr::get($response, 'packages'),
-            Arr::get($response, 'plans'),
-            Arr::get($response, 'data'),
+        $paths = [
+            'obj.packageList',
+            'data.obj.packageList',
+            'data.packageList',
+            'packageList',
+            'obj.packages',
+            'data.packages',
+            'packages',
+            'plans',
         ];
 
-        foreach ($candidates as $candidate) {
-            if (is_array($candidate) && array_is_list($candidate)) {
-                return $candidate;
+        foreach ($paths as $path) {
+            $packageList = Arr::get($response, $path);
+
+            Log::debug('Inspecting provider package-list path.', [
+                'path' => $path,
+                'value_type' => get_debug_type($packageList),
+                'is_array' => is_array($packageList),
+                'count' => is_array($packageList) ? count($packageList) : null,
+                'keys' => is_array($packageList) ? array_slice(array_keys($packageList), 0, 20) : null,
+            ]);
+
+            if (is_array($packageList)) {
+                Log::info('Provider package list extracted.', [
+                    'path' => $path,
+                    'package_count' => count($packageList),
+                    'first_package_keys' => isset($packageList[array_key_first($packageList)])
+                    && is_array($packageList[array_key_first($packageList)])
+                        ? array_keys($packageList[array_key_first($packageList)])
+                        : [],
+                ]);
+
+                return array_values($packageList);
             }
         }
 
+        Log::warning('No provider package list could be extracted.', [
+            'response_keys' => array_keys($response),
+            'response_shape' => $this->describeArrayShape($response),
+            'success' => Arr::get($response, 'success'),
+            'error_code' => Arr::get($response, 'errorCode') ?? Arr::get($response, 'code'),
+            'error_message' => Arr::get($response, 'errorMsg') ?? Arr::get($response, 'message'),
+        ]);
+
         return [];
+    }
+
+    private function describeArrayShape(array $value, int $depth = 0): array
+    {
+        if ($depth >= 3) {
+            return ['type' => 'array', 'count' => count($value)];
+        }
+
+        $shape = [];
+
+        foreach (array_slice($value, 0, 20, true) as $key => $item) {
+            if (is_array($item)) {
+                $shape[(string) $key] = [
+                    'type' => 'array',
+                    'count' => count($item),
+                    'children' => $this->describeArrayShape($item, $depth + 1),
+                ];
+            } else {
+                $shape[(string) $key] = [
+                    'type' => get_debug_type($item),
+                ];
+            }
+        }
+
+        return $shape;
     }
 
     private function filterPlansForCurrentPackage(array $plans, ?array $currentPlan): array
@@ -933,16 +1068,16 @@ class TopupService
     private function extractSupplierReference(array $payload): ?string
     {
         foreach ([
-            'obj.topUpEsimTranNo',
-            'data.topUpEsimTranNo',
-            'topUpEsimTranNo',
-            'obj.orderNo',
-            'data.orderNo',
-            'orderNo',
-            'obj.transactionId',
-            'data.transactionId',
-            'transactionId',
-        ] as $key) {
+                     'obj.topUpEsimTranNo',
+                     'data.topUpEsimTranNo',
+                     'topUpEsimTranNo',
+                     'obj.orderNo',
+                     'data.orderNo',
+                     'orderNo',
+                     'obj.transactionId',
+                     'data.transactionId',
+                     'transactionId',
+                 ] as $key) {
             $value = Arr::get($payload, $key);
 
             if (is_string($value) && trim($value) !== '') {
@@ -1070,20 +1205,30 @@ class TopupService
 
     private function priceCentsFromPackage(array $package): ?int
     {
-        $cents = $this->intFromKeys($package, ['priceCents', 'price_cents', 'unit_price_cents', 'amount_cents']);
-        if ($cents !== null) {
-            return $cents;
-        }
+        $cents = $this->intFromKeys($package, [
+            'priceCents',
+            'price_cents',
+            'unit_price_cents',
+            'amount_cents',
+        ]);
 
-        foreach (['price', 'unitPrice', 'unit_price', 'amount'] as $key) {
-            $value = Arr::get($package, $key);
+        if ($cents === null) {
+            foreach (['price', 'unitPrice', 'unit_price', 'amount'] as $key) {
+                $value = Arr::get($package, $key);
 
-            if ($value !== null && $value !== '' && is_numeric($value)) {
-                return max(0, (int) round(((float) $value) / 10));
+                if ($value !== null && $value !== '' && is_numeric($value)) {
+                    $cents = max(0, (int) round(((float) $value) / 10));
+                    break;
+                }
             }
         }
 
-        return null;
+        if ($cents === null) {
+            return null;
+        }
+
+        // 25% discount
+        return max(1, (int) round($cents * 0.75));
     }
 
     private function bytesToGb(?int $bytes): ?float
