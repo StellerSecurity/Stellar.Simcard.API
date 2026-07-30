@@ -14,6 +14,7 @@ Route::prefix('v1/topupcontroller')
         Route::post('/token', [TopupController::class, 'token']);
         Route::get('/resolve/{token}', [TopupController::class, 'resolve']);
         Route::post('/checkout', [TopupController::class, 'checkout']);
+        Route::post('/prepare', [TopupController::class, 'prepare']);
         Route::post('/fulfill', [TopupController::class, 'fulfill']);
     });
 

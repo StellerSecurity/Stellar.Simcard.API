@@ -170,6 +170,73 @@ class TopupService
         return $this->createCommerceCheckout($commerceUrl, $session, $matchedPlan);
     }
 
+    /**
+     * Prepare a provider-validated top-up session for a payment that has
+     * already been completed by an internal caller, for example a wholesale
+     * wallet debit. No Commerce checkout is created here.
+     *
+     * @return array<string,mixed>
+     */
+    public function preparePaidSession(
+        string $token,
+        string $packageCode,
+        string $idempotencyKey,
+        ?string $externalReference = null,
+        ?string $paymentReference = null,
+        string $source = 'internal_paid_topup',
+    ): array {
+        [$link, $simcard, $iccid] = $this->resolveValidLink($token);
+        $packageCode = $this->normalizePackageCode($packageCode);
+        $idempotencyKey = trim($idempotencyKey);
+        $externalReference = $this->nullableTrimmedString($externalReference, 128);
+        $paymentReference = $this->nullableTrimmedString($paymentReference, 191);
+        $source = trim($source) !== '' ? trim($source) : 'internal_paid_topup';
+
+        if (strlen($idempotencyKey) < 16 || strlen($idempotencyKey) > 128) {
+            throw new RuntimeException('Top-up idempotency key is invalid.', 422);
+        }
+
+        if (strlen($source) > 64 || preg_match('/^[A-Za-z0-9._:-]+$/', $source) !== 1) {
+            throw new RuntimeException('Top-up payment source is invalid.', 422);
+        }
+
+        if ($iccid === null || trim($iccid) === '') {
+            throw new RuntimeException('Top-up is not ready yet for this eSIM.', 409);
+        }
+
+        $currentPlan = $this->currentPlanForSimcard($simcard);
+        $account = $this->resolveProviderAccount($simcard, $iccid);
+        $providerPlans = $this->provider->listPlans(['iccid' => $iccid], $account);
+        $plans = $this->filterPlansForCurrentPackage(
+            $this->normalizeTopupPlans($providerPlans),
+            $currentPlan
+        );
+        $matchedPlan = $this->findPlanByPackageCode($plans, $packageCode);
+
+        if ($matchedPlan === null) {
+            throw new RuntimeException('Selected top-up package is not available for this eSIM.', 422);
+        }
+
+        [$session, $created] = $this->createOrReusePaidTopupSession(
+            link: $link,
+            simcard: $simcard,
+            plan: $matchedPlan,
+            packageCode: $packageCode,
+            callerIdempotencyKey: $idempotencyKey,
+            externalReference: $externalReference,
+            paymentReference: $paymentReference,
+            source: $source,
+        );
+
+        return [
+            'status' => $session->status,
+            'topup_session_id' => (string) $session->id,
+            'package_code' => (string) $session->package_code,
+            'supplier_reference' => $session->supplier_reference,
+            'idempotent' => ! $created,
+        ];
+    }
+
     public function fulfill(string $topupSessionId, ?string $commerceOrderId = null, ?string $commerceOrderItemId = null, ?string $idempotencyKey = null): array
     {
         $topupSessionId = $this->normalizeUuid($topupSessionId, 'Top-up session id is invalid.');
@@ -222,7 +289,7 @@ class TopupService
                 ]);
                 $session->save();
 
-                throw new RuntimeException($failureReason, 502);
+                throw new RuntimeException($failureReason, 422);
             }
 
             $supplierReference = $this->extractSupplierReference($providerResponse) ?: $transactionId;
@@ -254,7 +321,10 @@ class TopupService
             $session->commerce_order_id = $commerceOrderId ?: $session->commerce_order_id;
             $session->commerce_order_item_id = $commerceOrderItemId ?: $session->commerce_order_item_id;
 
-            if ($this->isRetryableProviderException($exception)) {
+            $providerHttpStatus = $this->providerExceptionHttpStatus($exception);
+            $runtimeStatus = $exception instanceof RuntimeException ? (int) $exception->getCode() : 0;
+
+            if ($this->isRetryableProviderException($exception) || $providerHttpStatus === 429 || $providerHttpStatus >= 500) {
                 // Do not permanently fail paid top-ups on provider/network timeouts.
                 // Commerce can retry with the same provider transaction id.
                 $session->failure_reason = 'Retryable top-up fulfillment error: ' . $exception->getMessage();
@@ -279,19 +349,29 @@ class TopupService
             $session->supplier_reference = null;
             $session->fulfilled_at = null;
             $session->failure_reason = $exception->getMessage();
-            $session->meta = array_merge((array) $session->meta, [
+            $session->meta = array_merge((array) $session->meta, array_filter([
                 'provider_transaction_id' => $transactionId,
-            ]);
+                'provider_http_status' => $providerHttpStatus > 0 ? $providerHttpStatus : null,
+            ], static fn ($value) => $value !== null));
             $session->save();
 
             Log::warning('Supplier top-up fulfillment failed.', [
                 'topup_session_id' => $session->id,
                 'simcard_id' => $simcard->id,
                 'package_code' => $session->package_code,
+                'provider_http_status' => $providerHttpStatus > 0 ? $providerHttpStatus : null,
                 'exception' => basename(str_replace('\\', '/', get_class($exception))),
             ]);
 
-            throw new RuntimeException('Top-up fulfillment failed: ' . $exception->getMessage(), 502);
+            if ($runtimeStatus >= 400 && $runtimeStatus <= 499) {
+                throw $exception;
+            }
+
+            if ($providerHttpStatus >= 400 && $providerHttpStatus <= 499) {
+                throw new RuntimeException('The provider rejected the top-up.', 422, $exception);
+            }
+
+            throw new RuntimeException('Top-up fulfillment failed: ' . $exception->getMessage(), 502, $exception);
         }
     }
 
@@ -494,6 +574,83 @@ class TopupService
         });
     }
 
+    /**
+     * @return array{0:SimcardTopupSession,1:bool}
+     */
+    private function createOrReusePaidTopupSession(
+        SimcardActionLink $link,
+        Simcard $simcard,
+        array $plan,
+        string $packageCode,
+        string $callerIdempotencyKey,
+        ?string $externalReference,
+        ?string $paymentReference,
+        string $source,
+    ): array {
+        $idempotencyKey = hash('sha256', implode('|', [
+            'simcard-paid-topup-session',
+            $source,
+            $callerIdempotencyKey,
+        ]));
+
+        return DB::transaction(function () use (
+            $link,
+            $simcard,
+            $plan,
+            $packageCode,
+            $idempotencyKey,
+            $callerIdempotencyKey,
+            $externalReference,
+            $paymentReference,
+            $source,
+        ): array {
+            $existing = SimcardTopupSession::query()
+                ->where('idempotency_key', $idempotencyKey)
+                ->lockForUpdate()
+                ->first();
+
+            if ($existing !== null) {
+                if (
+                    (string) $existing->simcard_id !== (string) $simcard->id
+                    || ! hash_equals(
+                        $this->normalizePackageCode((string) $existing->package_code),
+                        $this->normalizePackageCode($packageCode),
+                    )
+                ) {
+                    throw new RuntimeException('Top-up idempotency key was already used for another request.', 409);
+                }
+
+                return [$existing, false];
+            }
+
+            $session = new SimcardTopupSession();
+            $session->id = (string) Str::uuid();
+            $session->simcard_id = $simcard->id;
+            $session->action_link_id = $link->id;
+            $session->package_code = $packageCode;
+            $session->package_name = (string) ($plan['name'] ?? $plan['package_name'] ?? $packageCode);
+            $session->data_bytes = $plan['data_bytes'] ?? null;
+            $session->duration_days = $plan['duration_days'] ?? $plan['validity_days'] ?? null;
+            $session->price_cents = (int) ($plan['price_cents'] ?? $plan['unit_price_cents'] ?? 0);
+            $session->currency = strtoupper((string) ($plan['currency'] ?? 'EUR'));
+            $session->status = self::STATUS_PAID;
+            $session->idempotency_key = $idempotencyKey;
+            $session->meta = array_filter([
+                'plan' => $this->safePlanPayload($plan),
+                'simcard_snapshot' => $this->safeSimPayload($simcard),
+                'source' => $source,
+                'external_reference' => $externalReference,
+                'payment_reference' => $paymentReference,
+                'caller_idempotency_sha256' => hash('sha256', $callerIdempotencyKey),
+            ], static fn ($value) => $value !== null && $value !== '');
+            $session->requested_at = now();
+            $session->paid_at = now();
+            $session->save();
+
+            return [$session, true];
+        });
+    }
+
     private function createCommerceCheckout(string $commerceUrl, SimcardTopupSession $session, array $plan): array
     {
         $payload = [
@@ -556,6 +713,29 @@ class TopupService
 
             throw new RuntimeException('Top-up checkout could not be created.', 502);
         }
+    }
+
+    private function nullableTrimmedString(?string $value, int $maxLength): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $value = trim($value);
+        if ($value === '') {
+            return null;
+        }
+
+        return Str::limit($value, $maxLength, '');
+    }
+
+    private function providerExceptionHttpStatus(Throwable $exception): int
+    {
+        if ($exception instanceof \Illuminate\Http\Client\RequestException && $exception->response !== null) {
+            return $exception->response->status();
+        }
+
+        return 0;
     }
 
     private function isRetryableProviderException(Throwable $exception): bool
