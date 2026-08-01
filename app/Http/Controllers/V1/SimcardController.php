@@ -121,6 +121,7 @@ class SimcardController extends Controller
                     'package_code' => $result['simcard']->package_code,
                 ],
                 'provider' => $result['provider'],
+                'install' => $result['install'] ?? [],
             ],
         ], 200);
     }

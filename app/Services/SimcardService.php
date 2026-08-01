@@ -9,10 +9,14 @@ use App\Services\Esim\EsimMarketingRefundOfferService;
 use App\Services\Esim\EsimProvider;
 use App\Services\Esim\SimcardUserReferenceService;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
+use Throwable;
 
 class SimcardService
 {
+    private ?bool $installStorageAvailable = null;
+
     public function __construct(
         private readonly EsimProvider $provider,
         private readonly EsimCryptoService $crypto,
@@ -127,9 +131,10 @@ class SimcardService
         );
 
         $install = $this->fetchInstallInfoWithRetry($planId);
+        $this->storeInstallPayload($simcard, $planId, $install);
 
         return [
-            'simcard' => $simcard,
+            'simcard' => $simcard->fresh(),
             'install' => $install,
         ];
     }
@@ -155,9 +160,9 @@ class SimcardService
         $provider = $this->provider->queryOrder($externalOrderId, $this->preferredProviderAccount($simcard));
 
         // Extract the first eSIM entry if present.
-        $esim = $provider['obj']['esimList'][0] ?? null;
+        $esim = $this->firstProviderEsim($provider);
 
-        // Build a minimal, safe payload for clients (usage/status only).
+        // Build the safe usage/status payload plus the installation payload.
         $safeProvider = [
             'expires_at'      => $esim['expiredTime'] ?? null,
             'total_bytes'     => $esim['totalVolume'] ?? null,
@@ -171,6 +176,11 @@ class SimcardService
             'location_codes'  => $esim['packageList'][0]['locationCode'] ?? null,
         ];
 
+        $install = $this->buildInstallPayload($provider);
+        $this->storeInstallPayload($simcard, $planId, $install);
+        $simcard->refresh();
+        $install = $this->storedInstallPayload($simcard, $planId);
+
         $isInUse = strtoupper(trim((string) ($safeProvider['esim_status'] ?? ''))) === 'IN_USE';
         $hasUsage = is_numeric($safeProvider['used_bytes'] ?? null)
             && (int) $safeProvider['used_bytes'] > 0;
@@ -181,8 +191,9 @@ class SimcardService
         }
 
         return [
-            'simcard'  => $simcard,
+            'simcard'  => $simcard->fresh(),
             'provider' => $safeProvider,
+            'install'  => $install,
         ];
     }
 
@@ -223,7 +234,7 @@ class SimcardService
     ): array {
         $planIdHash = $this->crypto->derivePlanHash($planId);
 
-        return DB::transaction(function () use ($planIdHash, $userId, $source): array {
+        $result = DB::transaction(function () use ($planIdHash, $userId, $source): array {
             $simcard = Simcard::query()
                 ->where('plan_id_hash', $planIdHash)
                 ->lockForUpdate()
@@ -243,6 +254,25 @@ class SimcardService
                 'simcard' => $this->safeUserSimcardPayload($simcard->fresh()),
             ];
         });
+
+        if ($result['status'] === 'not_found') {
+            return $result;
+        }
+
+        // The ownership write is already committed. Installation refresh is best-effort
+        // and must never roll back or fail a successful attachment.
+        try {
+            $this->queryStatusByPlanId($planId);
+
+            $simcard = Simcard::query()->where('plan_id_hash', $planIdHash)->first();
+            if ($simcard) {
+                $result['simcard'] = $this->safeUserSimcardPayload($simcard);
+            }
+        } catch (Throwable) {
+            // The app can retry the lookup later using the private SIM ID.
+        }
+
+        return $result;
     }
 
     /** Detach one eSIM only when it belongs to the verified Stellar user. */
@@ -395,6 +425,8 @@ class SimcardService
 
     private function safeUserSimcardPayload(Simcard $simcard): array
     {
+        // Installation credentials are deliberately excluded from account listings.
+        // They can only be decrypted by the explicit plan_id possession-proof query.
         return [
             'id' => $simcard->id,
             'state' => $simcard->state,
@@ -521,40 +553,51 @@ class SimcardService
         return $this->crypto->decryptEmail($simcard->email_enc);
     }
 
-    /** Fetch install payload (AC) with a short retry loop */
+    /** Fetch install payload with a short retry loop. */
     private function fetchInstallInfoWithRetry(string $planId): array
     {
         $planIdHash = $this->crypto->derivePlanHash($planId);
-
         $simcard = Simcard::where('plan_id_hash', $planIdHash)->firstOrFail();
+
+        $stored = $this->storedInstallPayload($simcard, $planId);
+        if ($this->installPayloadReady($stored)) {
+            return $this->withLegacyInstallAliases($stored);
+        }
 
         $externalOrderId = $this->crypto->decryptForPlan(
             $planId,
             $simcard->external_order_id_enc
         );
 
+        $best = $this->emptyInstallPayload();
+
         for ($i = 0; $i < 10; $i++) {
-            $provider = $this->provider->queryOrder($externalOrderId, $this->preferredProviderAccount($simcard));
+            $provider = $this->provider->queryOrder(
+                $externalOrderId,
+                $this->preferredProviderAccount($simcard)
+            );
 
             $install = $this->buildInstallPayload($provider);
+            $best = array_replace($best, array_filter(
+                $install,
+                static fn (mixed $value): bool => $value !== null && $value !== ''
+            ));
 
-            // AC is the only thing we need for installation.
-            if (!empty($install['ac'])) {
+            if ($this->installPayloadReady($best)) {
                 if ($simcard->state !== 'OK') {
                     $simcard->state = 'OK';
                     $simcard->save();
                 }
 
-                return $install;
+                break;
             }
 
-            usleep(350_000); // 350ms
+            usleep(350_000);
         }
 
-        return [
-            'ac' => null,
-            'apn' => null,
-        ];
+        $this->storeInstallPayload($simcard, $planId, $best);
+
+        return $this->withLegacyInstallAliases($best);
     }
 
     private function preferredProviderAccount(Simcard $simcard): string
@@ -564,27 +607,234 @@ class SimcardService
             : 'legacy';
     }
 
-    /** Build install payload from provider response */
+    /** Build a canonical install payload from provider response aliases. */
     private function buildInstallPayload(array $provider): array
     {
-        $esim = $provider['obj']['esimList'][0] ?? null;
+        $esim = $this->firstProviderEsim($provider);
 
-        if (!is_array($esim)) {
-            return [
-                'ac' => null,
-                'apn' => null,
-            ];
+        if ($esim === []) {
+            return $this->emptyInstallPayload();
         }
 
+        $lpa = $this->normalizeLpa($this->firstString([
+            $esim['ac'] ?? null,
+            $esim['lpa'] ?? null,
+            $esim['activationCode'] ?? null,
+            $esim['activation_code'] ?? null,
+            $esim['installation']['ac'] ?? null,
+            $esim['installation']['lpa'] ?? null,
+            $esim['install']['ac'] ?? null,
+            $esim['install']['lpa'] ?? null,
+        ]));
+
         return [
-            'ac' => $esim['ac'] ?? null,
+            'qr_code_url' => $this->httpsUrl($this->firstString([
+                $esim['qrCodeUrl'] ?? null,
+                $esim['qr_code_url'] ?? null,
+                $esim['qrUrl'] ?? null,
+                $esim['qr_url'] ?? null,
+                $esim['installation']['qrCodeUrl'] ?? null,
+                $esim['install']['qrCodeUrl'] ?? null,
+            ])),
+            'short_url' => $this->httpsUrl($this->firstString([
+                $esim['shortUrl'] ?? null,
+                $esim['short_url'] ?? null,
+                $esim['installUrl'] ?? null,
+                $esim['install_url'] ?? null,
+                $esim['downloadUrl'] ?? null,
+                $esim['installation']['shortUrl'] ?? null,
+                $esim['install']['shortUrl'] ?? null,
+            ])),
+            'lpa' => $lpa,
             'apn' => $this->extractApn($esim),
         ];
     }
 
+    private function firstProviderEsim(array $provider): array
+    {
+        foreach ([
+            data_get($provider, 'obj.esimList.0'),
+            data_get($provider, 'data.obj.esimList.0'),
+            data_get($provider, 'data.esimList.0'),
+            data_get($provider, 'esimList.0'),
+        ] as $candidate) {
+            if (is_array($candidate)) {
+                return $candidate;
+            }
+        }
+
+        return [];
+    }
+
+    private function storeInstallPayload(Simcard $simcard, string $planId, array $payload): void
+    {
+        if (! $this->installStorageAvailable()) {
+            return;
+        }
+
+        $incoming = $this->canonicalInstallPayload($payload);
+        $existing = $this->storedInstallPayload($simcard, $planId);
+        $payload = array_replace($existing, array_filter(
+            $incoming,
+            static fn (mixed $value): bool => $value !== null && $value !== ''
+        ));
+
+        if (! $this->hasInstallPayload($payload) || $payload === $existing) {
+            return;
+        }
+
+        $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if (! is_string($json)) {
+            return;
+        }
+
+        // The ciphertext key is derived from the exact 16-digit plan_id.
+        // The database stores only the ciphertext and the non-reversible plan hash.
+        $simcard->install_payload_enc = $this->crypto->encryptForPlan($planId, $json);
+        $simcard->install_payload_crypto_version = 2;
+        $simcard->install_payload_captured_at = now();
+        $simcard->save();
+    }
+
+    private function storedInstallPayload(Simcard $simcard, string $planId): array
+    {
+        if (
+            ! $this->installStorageAvailable()
+            || (int) $simcard->install_payload_crypto_version !== 2
+            || ! is_string($simcard->install_payload_enc)
+            || $simcard->install_payload_enc === ''
+        ) {
+            return [];
+        }
+
+        try {
+            $decoded = json_decode(
+                $this->crypto->decryptForPlan($planId, $simcard->install_payload_enc),
+                true,
+                16,
+                JSON_THROW_ON_ERROR
+            );
+
+            return is_array($decoded) ? $this->canonicalInstallPayload($decoded) : [];
+        } catch (Throwable) {
+            return [];
+        }
+    }
+
+    private function installStorageAvailable(): bool
+    {
+        return $this->installStorageAvailable ??= Schema::hasColumn('simcards', 'install_payload_enc')
+            && Schema::hasColumn('simcards', 'install_payload_crypto_version');
+    }
+
+    private function canonicalInstallPayload(array $payload): array
+    {
+        return [
+            'qr_code_url' => $this->httpsUrl($this->firstString([
+                $payload['qr_code_url'] ?? null,
+                $payload['qrCodeUrl'] ?? null,
+            ])),
+            'short_url' => $this->httpsUrl($this->firstString([
+                $payload['short_url'] ?? null,
+                $payload['shortUrl'] ?? null,
+                $payload['install_url'] ?? null,
+            ])),
+            'lpa' => $this->normalizeLpa($this->firstString([
+                $payload['lpa'] ?? null,
+                $payload['ac'] ?? null,
+                $payload['activation_code'] ?? null,
+            ])),
+            'apn' => $this->textValue($payload['apn'] ?? null, 255),
+        ];
+    }
+
+    private function withLegacyInstallAliases(array $payload): array
+    {
+        $payload = $this->canonicalInstallPayload($payload);
+        $payload['ac'] = $payload['lpa'];
+
+        return $payload;
+    }
+
+    private function emptyInstallPayload(): array
+    {
+        return [
+            'qr_code_url' => null,
+            'short_url' => null,
+            'lpa' => null,
+            'apn' => null,
+        ];
+    }
+
+    private function hasInstallPayload(array $payload): bool
+    {
+        foreach ($payload as $value) {
+            if (is_string($value) && $value !== '') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function installPayloadReady(array $payload): bool
+    {
+        return ! empty($payload['lpa'])
+            && (! empty($payload['qr_code_url']) || ! empty($payload['short_url']));
+    }
+
+    private function normalizeLpa(?string $value): ?string
+    {
+        $value = $this->textValue($value, 4096);
+        if ($value === null) {
+            return null;
+        }
+
+        if (str_starts_with($value, '1$')) {
+            $value = 'LPA:'.$value;
+        }
+
+        return preg_match('/^LPA:1\$/i', $value) === 1 ? $value : null;
+    }
+
+    private function httpsUrl(?string $value): ?string
+    {
+        $value = $this->textValue($value, 4096);
+        if ($value === null || filter_var($value, FILTER_VALIDATE_URL) === false) {
+            return null;
+        }
+
+        return strtolower((string) parse_url($value, PHP_URL_SCHEME)) === 'https'
+            ? $value
+            : null;
+    }
+
+    private function firstString(array $values): ?string
+    {
+        foreach ($values as $value) {
+            $value = $this->textValue($value, 4096);
+            if ($value !== null) {
+                return $value;
+            }
+        }
+
+        return null;
+    }
+
+    private function textValue(mixed $value, int $maxLength): ?string
+    {
+        if (! is_scalar($value)) {
+            return null;
+        }
+
+        $value = trim((string) $value);
+
+        return $value !== '' && strlen($value) <= $maxLength ? $value : null;
+    }
+
     private function extractApn(array $esim): ?string
     {
-        $candidates = [
+        return $this->firstString([
             $esim['apn'] ?? null,
             $esim['apnValue'] ?? null,
             $esim['accessPointName'] ?? null,
@@ -592,14 +842,6 @@ class SimcardService
             $esim['install']['apn'] ?? null,
             $esim['profile']['apn'] ?? null,
             $esim['packageList'][0]['apn'] ?? null,
-        ];
-
-        foreach ($candidates as $candidate) {
-            if (is_string($candidate) && trim($candidate) !== '') {
-                return trim($candidate);
-            }
-        }
-
-        return null;
+        ]);
     }
 }

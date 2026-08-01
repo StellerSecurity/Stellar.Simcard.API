@@ -22,6 +22,8 @@ class Simcard extends Model
         'email_opt_in_at' => 'datetime',
         'user_ref_version' => 'integer',
         'user_linked_at' => 'datetime',
+        'install_payload_captured_at' => 'datetime',
+        'install_payload_crypto_version' => 'integer',
     ];
 
     protected $fillable = [
@@ -31,6 +33,9 @@ class Simcard extends Model
         'package_code',
         'external_order_id_enc',
         'external_order_id_hash',
+        'install_payload_enc',
+        'install_payload_crypto_version',
+        'install_payload_captured_at',
         'iccid_enc',
         'iccid_hash',
         'iccid_last4',
@@ -67,6 +72,9 @@ class Simcard extends Model
     protected $hidden = [
         'external_order_id_enc',
         'external_order_id_hash',
+        'install_payload_enc',
+        'install_payload_crypto_version',
+        'install_payload_captured_at',
         'iccid_enc',
         'iccid_hash',
         'plan_id_hash',

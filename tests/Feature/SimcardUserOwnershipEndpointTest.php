@@ -140,3 +140,42 @@ it('detaches all user associations for account deletion', function (): void {
         ->assertOk()
         ->assertJsonPath('data.detached_count', 3);
 });
+
+it('returns usage and install details from the private plan lookup', function (): void {
+    $simcard = new Simcard();
+    $simcard->state = 'OK';
+    $simcard->provider = 'esimaccess';
+    $simcard->package_code = 'DK-3GB';
+
+    $this->mock(SimcardService::class, function (MockInterface $mock) use ($simcard): void {
+        $mock->shouldReceive('queryStatusByPlanId')
+            ->once()
+            ->with('1234123412341234')
+            ->andReturn([
+                'simcard' => $simcard,
+                'provider' => [
+                    'total_bytes' => 3221225472,
+                    'used_bytes' => 24656437,
+                    'remaining_bytes' => 3196569035,
+                    'esim_status' => 'IN_USE',
+                ],
+                'install' => [
+                    'qr_code_url' => 'https://cdn.example.test/esim/qr.png',
+                    'short_url' => 'https://install.example.test/e/abc123',
+                    'lpa' => 'LPA:1$rsp-eu.example.test$ABC123',
+                    'apn' => 'bicsapn',
+                ],
+            ]);
+    });
+
+    $this->withHeaders(simApiBasicAuth())
+        ->postJson('/api/v1/sim/query', [
+            'plan_id' => '1234 1234 1234 1234',
+        ])
+        ->assertOk()
+        ->assertJsonPath('data.provider.remaining_bytes', 3196569035)
+        ->assertJsonPath('data.install.qr_code_url', 'https://cdn.example.test/esim/qr.png')
+        ->assertJsonPath('data.install.short_url', 'https://install.example.test/e/abc123')
+        ->assertJsonPath('data.install.lpa', 'LPA:1$rsp-eu.example.test$ABC123')
+        ->assertJsonPath('data.install.apn', 'bicsapn');
+});
