@@ -1,141 +1,148 @@
 # Stellar eSIM API
 
-A privacy-first eSIM backend built on a single uncompromising principle:
+A privacy-first Laravel backend for eSIM ordering, provisioning, usage, top-up, and optional Stellar account association.
 
 **If we cannot see it, we cannot leak it.**
 
-Stellar eSim can be purchased at: https://stellarsecurity.com/stellar-esim
+Stellar eSIM can be purchased at: https://stellarsecurity.com/stellar-esim
 
-This project powers eSIM purchases and provisioning while deliberately preventing the operator from accessing or reconstructing sensitive user data such as SIM identifiers or activation credentials.
+## Privacy model
 
-This is not a CRM.  
-This is not an analytics platform.  
-This is infrastructure designed to know as little as possible.
+- The 16-digit `plan_id` is never stored in plaintext.
+- Database lookup uses a versioned PBKDF2-HMAC-SHA256 value.
+- Provider order references are encrypted using a per-plan key.
+- ICCIDs are never stored in plaintext.
+- Optional user ownership is stored as a versioned keyed HMAC, not a raw user ID.
+- Anonymous eSIMs remain valid and have no user association.
+- API responses hide hashes, encrypted fields, and ownership references.
 
----
+The optional user association is pseudonymous and supports authenticated account experiences without making ownership mandatory. See [SIMCARD_USER_OWNERSHIP.md](SIMCARD_USER_OWNERSHIP.md).
 
-## Core Principles
+## Architecture
 
-### 1. Zero-knowledge by design
-- **plan_id (SIM-ID)** is never stored in plaintext.
-- All database lookups use a **slow, keyed, non-reversible hash**.
-- Sensitive provider data is encrypted **per plan**, not globally.
+```text
+Mobile app / website / commerce service
+                |
+                | plan_id and authenticated server requests
+                v
+        Stellar eSIM API
+        |- plan hash lookup
+        |- per-plan encryption
+        |- optional user_ref HMAC
+        `- eSIMAccess provider integration
+```
 
----
+The Mobile UI API must resolve the canonical Stellar `user_id` from the user's bearer token. The mobile app must never send a trusted user ID directly to this API.
 
-### 2. No single global secret is sufficient to decrypt user data
-- There is **no master decrypt-everything key**.
-- Each plan derives its own encryption key from:
-    - a secret master key
-    - the user-known `plan_id`
-- Without the `plan_id`, decryption is cryptographically infeasible.
+## `plan_id` rules
 
----
-
-### 3. Minimal data retention
-We intentionally do **not** store:
-- ICCID
-- Full activation credentials in plaintext
-- Account references
-- User metadata beyond what is strictly required
-
-What *is* stored:
-- A versioned, slow hash of `plan_id`
-- Encrypted provider order references
-- Provider identifier
-- Package code
-- Order state
-
-Nothing more.
-
----
-
-## Architecture Overview
-
-Client (app)  
-│  
-│  plan_id (16 digits, user-only)  
-▼  
-API  
-├─ derivePlanHash(plan_id)  → DB lookup  
-├─ derivePlanKey(plan_id)   → per-plan encryption  
-└─ provider integration
-
-### plan_id rules
-- Exactly **16 digits**
-- Numbers only
-- May be printed with spaces for humans
-- Normalized before cryptographic use
-
----
+- Exactly 16 digits after normalization
+- Spaces are accepted in API input and removed before validation
+- Never persisted in plaintext
+- Required to decrypt provider order data
 
 ## Cryptography
 
-### Plan hash (DB lookup)
-- **PBKDF2-HMAC-SHA256**
-- **800,000 iterations**
-- Keyed with a secret hash key (pepper)
-- Versioned (`v1:` prefix)
+### Plan lookup
 
-#### Why 800,000 iterations?
+- PBKDF2-HMAC-SHA256
+- 800,000 iterations
+- Secret pepper
+- Versioned `v1:` format
 
-- **OWASP Password Storage Cheat Sheet (2023)** recommends:
-    - ≥ **600,000 iterations** for PBKDF2-HMAC-SHA256
-- Security guidance increasingly recommends **tuning for time**, not a fixed number:
-    - ~1–3 seconds per hash on production hardware
-- 800,000 iterations is chosen as a **2025-safe baseline**:
-    - Strong resistance to offline brute-force
-    - Still operationally viable on modern servers
-    - Can be increased further as CPU headroom allows
+### Provider data
 
-> Iteration count is an **operational parameter**, and can be increased over time while keeping the same hash versioning strategy.
+- AES-256-GCM
+- Per-plan key derived from the master key and private plan ID
 
-**Source:**
-- OWASP Password Storage Cheat Sheet (2023)  
-  https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html
+### Optional user ownership
 
-**Purpose:**  
-Resist offline brute-force attacks even if the database and hash key are leaked.
+- HMAC-SHA256
+- Separate dedicated secret from Azure Key Vault
+- Versioned `v1:` format
+- Indexed deterministic lookup
+- Raw user IDs are not written to new simcard rows
 
----
+## Main API routes
 
-### Encryption
-- **AES-256-GCM**
-- 96-bit IV
-- 128-bit authentication tag
-- Key derived per plan using `HMAC(master_key, plan_id)`
+All internal routes use HTTP Basic Auth through `stellar.sim.basic`.
 
-**Purpose:**  
-Ensure encrypted values are useless without the user’s `plan_id`.
+```text
+GET     /api/v1/sim/plans
+POST    /api/v1/sim/order
+POST    /api/v1/sim/query
+POST    /api/v1/sim/user
+PATCH   /api/v1/sim/user
+DELETE  /api/v1/sim/user
+DELETE  /api/v1/sim/user/all
+```
 
----
+Top-up routes remain under:
 
-## Threat Model (Explicit)
+```text
+/api/v1/topupcontroller/*
+```
 
-This system assumes:
-- Databases may leak
-- Logs may leak
-- Backups may leak
+## Local setup
 
-This system guarantees:
-- No operator can enumerate users
-- No operator can decrypt user data without the `plan_id`
-- No meaningful user data can be reconstructed at rest
+```bash
+cp .env.example .env
+composer install
+php artisan key:generate
+php artisan migrate
+php artisan test
+php artisan serve
+```
 
----
+Generate the optional user-reference key:
 
-## What this API is **not**
+```bash
+php -r "echo base64_encode(random_bytes(32)), PHP_EOL;"
+```
 
-- No user dashboards
-- No behavioral analytics
-- No tracking identifiers
-- No recovery backdoors
-- No silent correlation across plans
+Set it as:
 
----
+```env
+ESIM_USER_REF_HASH_VERSION=1
+ESIM_USER_REF_HASH_KEY_V1=...
+```
+
+## Azure deployment
+
+Use Azure App Service application settings and Key Vault references for all secrets. After deployment:
+
+```bash
+php artisan optimize:clear
+php artisan migrate --force
+php artisan config:cache
+```
+
+Use a shared cache store for distributed throttling when scaling to multiple instances.
+
+## Legacy migration
+
+The old implementation defaulted missing order ownership to `user_id=1`. New code no longer does this. Existing `user_id=1` rows are treated as unverified and skipped by the ownership backfill command.
+
+Dry run:
+
+```bash
+php artisan simcards:backfill-user-references
+```
+
+Commit verified legacy rows and clear raw identifiers:
+
+```bash
+php artisan simcards:backfill-user-references --commit --clear-raw
+```
+
+## Tests
+
+```bash
+php artisan test
+```
+
+Tests cover deterministic keyed user references, key rotation, anonymous ordering, assignment, conflict handling, listing, single detachment, and account-deletion detachment.
 
 ## License
 
 MIT
-
----

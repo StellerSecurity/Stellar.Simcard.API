@@ -2,8 +2,8 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
+use Illuminate\Database\Eloquent\Model;
 
 class Simcard extends Model
 {
@@ -20,6 +20,8 @@ class Simcard extends Model
         'marketing_refund_notification_queued_at' => 'datetime',
         'last_webhook_at' => 'datetime',
         'email_opt_in_at' => 'datetime',
+        'user_ref_version' => 'integer',
+        'user_linked_at' => 'datetime',
     ];
 
     protected $fillable = [
@@ -47,7 +49,10 @@ class Simcard extends Model
         'marketing_refund_notification_attempted_at',
         'marketing_refund_notification_queued_at',
         'last_webhook_at',
-        'user_id',
+        'user_ref',
+        'user_ref_version',
+        'user_linked_at',
+        'user_link_source',
         'commerce_order_id',
         'commerce_order_item_id',
         'commerce_unit',
@@ -56,7 +61,7 @@ class Simcard extends Model
         'email_hash',
         'email_opt_in_at',
         'email_source',
-        'purchased_on'
+        'purchased_on',
     ];
 
     protected $hidden = [
@@ -67,5 +72,10 @@ class Simcard extends Model
         'plan_id_hash',
         'email_enc',
         'email_hash',
+        'user_id',
+        'user_ref',
+        'user_ref_version',
+        'user_linked_at',
+        'user_link_source',
     ];
 }

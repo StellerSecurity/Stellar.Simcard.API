@@ -46,6 +46,12 @@ stages:
       workingDirectory: $(rootFolder)
       displayName: 'Composer install'
 
+    - script: |
+        export APP_KEY="base64:$(php -r 'echo base64_encode(random_bytes(32));')"
+        php artisan test
+      workingDirectory: $(rootFolder)
+      displayName: 'Run Laravel tests'
+
     - task: ArchiveFiles@2
       displayName: 'Archive files'
       inputs:

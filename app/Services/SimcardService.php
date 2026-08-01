@@ -2,10 +2,12 @@
 
 namespace App\Services;
 
+use App\Exceptions\SimcardOwnershipConflictException;
 use App\Models\Simcard;
 use App\Services\Esim\EsimCryptoService;
 use App\Services\Esim\EsimMarketingRefundOfferService;
 use App\Services\Esim\EsimProvider;
+use App\Services\Esim\SimcardUserReferenceService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
@@ -15,6 +17,7 @@ class SimcardService
         private readonly EsimProvider $provider,
         private readonly EsimCryptoService $crypto,
         private readonly EsimMarketingRefundOfferService $marketingRefundOffer,
+        private readonly SimcardUserReferenceService $userReferences,
     ) {}
 
     /** Fetch plan list from provider */
@@ -25,7 +28,7 @@ class SimcardService
 
     /** Create eSIM order using a client-side generated plan_id (idempotent per plan_id_hash) */
     public function orderEsim(
-        int $userId,
+        ?int $userId,
         ?string $accountRef,
         string $packageCode,
         string $planId,
@@ -57,6 +60,7 @@ class SimcardService
             if ($existing) {
                 $this->storeEmailOnSimcard($existing, $email, $emailSource);
                 $this->attachCommerceIdempotencyMetadata($existing, $commerceOrderId, $commerceOrderItemId, $commerceUnit, $idempotencyKey);
+                $this->attachUserReference($existing, $userId, 'purchase');
 
                 return $existing;
             }
@@ -79,7 +83,10 @@ class SimcardService
                 'external_order_id_enc'  => $externalOrderIdEnc,
                 'external_order_id_hash' => $externalOrderIdHash,
                 'state'                  => 'pending',
-                'user_id'                => $userId,
+                'user_ref'               => $userId !== null ? $this->userReferences->derive($userId) : null,
+                'user_ref_version'       => $userId !== null ? $this->userReferences->currentVersion() : null,
+                'user_linked_at'         => $userId !== null ? now() : null,
+                'user_link_source'       => $userId !== null ? 'purchase' : null,
                 'commerce_order_id'      => $commerceOrderId,
                 'commerce_order_item_id' => $commerceOrderItemId,
                 'commerce_unit'          => $commerceUnit,
@@ -95,7 +102,7 @@ class SimcardService
 
     /** Order and return install payload (AC) when available */
     public function orderAndGetInstallInfo(
-        int $userId,
+        ?int $userId,
         ?string $accountRef,
         string $packageCode,
         string $planId,
@@ -176,6 +183,235 @@ class SimcardService
         return [
             'simcard'  => $simcard,
             'provider' => $safeProvider,
+        ];
+    }
+
+    /**
+     * Return safe simcard metadata for one verified Stellar user.
+     * Raw user IDs and derived user references never leave this service.
+     */
+    public function listByUserId(int $userId): array
+    {
+        $userReferences = array_values($this->userReferences->deriveAll($userId));
+
+        return Simcard::query()
+            ->where(function ($query) use ($userReferences, $userId): void {
+                $query->whereIn('user_ref', $userReferences);
+
+                // Transitional compatibility for verified legacy rows. user_id=1 is
+                // deliberately excluded because anonymous orders were assigned to 1.
+                if ($userId !== 1) {
+                    $query->orWhere('user_id', $userId);
+                }
+            })
+            ->orderByDesc('purchased_on')
+            ->orderBy('id')
+            ->get()
+            ->map(fn (Simcard $simcard): array => $this->safeUserSimcardPayload($simcard))
+            ->values()
+            ->all();
+    }
+
+    /**
+     * Attach an existing eSIM to a verified Stellar user.
+     * The plan_id acts as the private possession proof and is never stored.
+     */
+    public function assignUserByPlanId(
+        string $planId,
+        int $userId,
+        string $source = 'manual_claim'
+    ): array {
+        $planIdHash = $this->crypto->derivePlanHash($planId);
+
+        return DB::transaction(function () use ($planIdHash, $userId, $source): array {
+            $simcard = Simcard::query()
+                ->where('plan_id_hash', $planIdHash)
+                ->lockForUpdate()
+                ->first();
+
+            if (! $simcard) {
+                return ['status' => 'not_found', 'simcard' => null];
+            }
+
+            $alreadyAssigned = $simcard->user_ref !== null
+                && $this->userReferences->matches($simcard->user_ref, $userId, $simcard->user_ref_version);
+
+            $this->attachUserReference($simcard, $userId, $source);
+
+            return [
+                'status' => $alreadyAssigned ? 'already_assigned' : 'assigned',
+                'simcard' => $this->safeUserSimcardPayload($simcard->fresh()),
+            ];
+        });
+    }
+
+    /** Detach one eSIM only when it belongs to the verified Stellar user. */
+    public function detachUserByPlanId(string $planId, int $userId): array
+    {
+        $planIdHash = $this->crypto->derivePlanHash($planId);
+        return DB::transaction(function () use ($planIdHash, $userId): array {
+            $simcard = Simcard::query()
+                ->where('plan_id_hash', $planIdHash)
+                ->lockForUpdate()
+                ->first();
+
+            if (! $simcard) {
+                return ['status' => 'not_found', 'simcard' => null];
+            }
+
+            if ($simcard->user_ref === null) {
+                $legacyUserId = $simcard->user_id !== null ? (int) $simcard->user_id : null;
+
+                if ($legacyUserId !== null && $legacyUserId !== 1 && $legacyUserId !== $userId) {
+                    throw new SimcardOwnershipConflictException(
+                        'The eSIM is assigned to another user.'
+                    );
+                }
+
+                if ($legacyUserId === $userId && $userId !== 1) {
+                    $this->clearUserReference($simcard);
+
+                    return [
+                        'status' => 'detached',
+                        'simcard' => $this->safeUserSimcardPayload($simcard->fresh()),
+                    ];
+                }
+
+                return [
+                    'status' => 'already_detached',
+                    'simcard' => $this->safeUserSimcardPayload($simcard),
+                ];
+            }
+
+            if (! $this->userReferences->matches(
+                $simcard->user_ref,
+                $userId,
+                $simcard->user_ref_version,
+            )) {
+                throw new SimcardOwnershipConflictException(
+                    'The eSIM is assigned to another user.'
+                );
+            }
+
+            $this->clearUserReference($simcard);
+
+            return [
+                'status' => 'detached',
+                'simcard' => $this->safeUserSimcardPayload($simcard->fresh()),
+            ];
+        });
+    }
+
+    /** Detach all eSIM associations for account deletion/privacy workflows. */
+    public function detachAllForUserId(int $userId): int
+    {
+        $userReferences = array_values($this->userReferences->deriveAll($userId));
+
+        return Simcard::query()
+            ->where(function ($query) use ($userReferences, $userId): void {
+                $query->whereIn('user_ref', $userReferences);
+
+                if ($userId !== 1) {
+                    $query->orWhere('user_id', $userId);
+                }
+            })
+            ->update([
+                'user_id' => null,
+                'user_ref' => null,
+                'user_ref_version' => null,
+                'user_linked_at' => null,
+                'user_link_source' => null,
+            ]);
+    }
+
+    private function attachUserReference(
+        Simcard $simcard,
+        ?int $userId,
+        string $source
+    ): void {
+        if ($userId === null) {
+            return;
+        }
+
+        $version = $this->userReferences->currentVersion();
+        $reference = $this->userReferences->derive($userId, $version);
+        $changed = false;
+
+        if ($simcard->user_ref === null && $simcard->user_id !== null) {
+            $legacyUserId = (int) $simcard->user_id;
+
+            if ($legacyUserId !== 1 && $legacyUserId !== $userId) {
+                throw new SimcardOwnershipConflictException(
+                    'The eSIM is already assigned to another user.'
+                );
+            }
+        }
+
+        if ($simcard->user_ref !== null) {
+            if (! $this->userReferences->matches(
+                $simcard->user_ref,
+                $userId,
+                $simcard->user_ref_version,
+            )) {
+                throw new SimcardOwnershipConflictException(
+                    'The eSIM is already assigned to another user.'
+                );
+            }
+
+            // Transparently rotate a verified reference to the current key version.
+            if ($simcard->user_ref_version !== $version || ! hash_equals($simcard->user_ref, $reference)) {
+                $simcard->user_ref = $reference;
+                $simcard->user_ref_version = $version;
+                $changed = true;
+            }
+        } else {
+            $simcard->user_ref = $reference;
+            $simcard->user_ref_version = $version;
+            $simcard->user_linked_at = now();
+            $simcard->user_link_source = $source;
+            $changed = true;
+        }
+
+        // Remove any legacy raw user identifier when an association is confirmed.
+        if ($simcard->user_id !== null) {
+            $simcard->user_id = null;
+            $changed = true;
+        }
+
+        if ($changed) {
+            $simcard->save();
+        }
+    }
+
+    private function clearUserReference(Simcard $simcard): void
+    {
+        $simcard->user_id = null;
+        $simcard->user_ref = null;
+        $simcard->user_ref_version = null;
+        $simcard->user_linked_at = null;
+        $simcard->user_link_source = null;
+        $simcard->save();
+    }
+
+    private function safeUserSimcardPayload(Simcard $simcard): array
+    {
+        return [
+            'id' => $simcard->id,
+            'state' => $simcard->state,
+            'provider' => $simcard->provider,
+            'package_code' => $simcard->package_code,
+            'iccid_last4' => $simcard->iccid_last4,
+            'esim_status' => $simcard->esim_status,
+            'smdp_status' => $simcard->smdp_status,
+            'data_status' => $simcard->data_status,
+            'validity_status' => $simcard->validity_status,
+            'total_bytes' => $simcard->total_volume,
+            'used_bytes' => $simcard->order_usage,
+            'remaining_bytes' => $simcard->remaining_volume,
+            'remaining_validity' => $simcard->remaining_validity,
+            'expires_at' => $simcard->expires_at?->toIso8601String(),
+            'activated_at' => $simcard->activated_at?->toIso8601String(),
+            'purchased_on' => $simcard->purchased_on?->format('Y-m-d'),
         ];
     }
 

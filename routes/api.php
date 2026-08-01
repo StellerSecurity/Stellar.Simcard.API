@@ -30,4 +30,20 @@ Route::prefix('v1/sim')
         // POST /api/v1/sim/query
         Route::post('/query', [SimcardController::class, 'query']);
 
+        // POST /api/v1/sim/user
+        Route::post('/user', [SimcardController::class, 'user'])
+            ->middleware('throttle:sim.user.read');
+
+        // PATCH /api/v1/sim/user
+        Route::patch('/user', [SimcardController::class, 'patchUser'])
+            ->middleware('throttle:sim.user.write');
+
+        // DELETE /api/v1/sim/user
+        Route::delete('/user', [SimcardController::class, 'deleteUser'])
+            ->middleware('throttle:sim.user.write');
+
+        // DELETE /api/v1/sim/user/all
+        Route::delete('/user/all', [SimcardController::class, 'deleteAllUser'])
+            ->middleware('throttle:sim.user.write');
+
     });

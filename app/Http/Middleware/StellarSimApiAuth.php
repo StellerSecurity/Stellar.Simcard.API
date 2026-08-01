@@ -4,26 +4,27 @@ namespace App\Http\Middleware;
 
 use Closure;
 use Illuminate\Http\Request;
+use Symfony\Component\HttpFoundation\Response;
 
 class StellarSimApiAuth
 {
-    public function handle(Request $request, Closure $next)
+    public function handle(Request $request, Closure $next): Response
     {
-        $username = $request->getUser();
-        $password = $request->getPassword();
+        $username = (string) $request->getUser();
+        $password = (string) $request->getPassword();
 
-        $expectedUser = env('APPSETTING_API_USERNAME_STELLAR_SIM_API');
-        $expectedPass = env('APPSETTING_API_PASSWORD_STELLAR_SIM_API');
+        $expectedUser = (string) env('APPSETTING_API_USERNAME_STELLAR_SIM_API', '');
+        $expectedPass = (string) env('APPSETTING_API_PASSWORD_STELLAR_SIM_API', '');
 
-        if (
-            empty($expectedUser) ||
-            empty($expectedPass) ||
-            $username !== $expectedUser ||
-            $password !== $expectedPass
-        ) {
+        $authorized = $expectedUser !== ''
+            && $expectedPass !== ''
+            && hash_equals($expectedUser, $username)
+            && hash_equals($expectedPass, $password);
+
+        if (! $authorized) {
             return response()
                 ->json([
-                    'response_code'    => 401,
+                    'response_code' => 401,
                     'response_message' => 'Unauthorized Sim API basic.',
                 ], 401, [
                     'WWW-Authenticate' => 'Basic realm="Stellar Sim API"',
