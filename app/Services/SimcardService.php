@@ -275,61 +275,84 @@ class SimcardService
         return $result;
     }
 
-    /** Detach one eSIM only when it belongs to the verified Stellar user. */
+    /** Detach one eSIM by private plan ID after verified possession proof. */
     public function detachUserByPlanId(string $planId, int $userId): array
     {
         $planIdHash = $this->crypto->derivePlanHash($planId);
+
         return DB::transaction(function () use ($planIdHash, $userId): array {
             $simcard = Simcard::query()
                 ->where('plan_id_hash', $planIdHash)
                 ->lockForUpdate()
                 ->first();
 
-            if (! $simcard) {
-                return ['status' => 'not_found', 'simcard' => null];
-            }
+            return $this->detachVerifiedUserSimcard($simcard, $userId);
+        });
+    }
 
-            if ($simcard->user_ref === null) {
-                $legacyUserId = $simcard->user_id !== null ? (int) $simcard->user_id : null;
+    /**
+     * Detach by the account-list UUID. The UUID identifies the row, while the
+     * verified user reference authorizes the mutation. No private SIM ID or
+     * installation-data decryption is required.
+     */
+    public function detachUserById(string $simcardId, int $userId): array
+    {
+        return DB::transaction(function () use ($simcardId, $userId): array {
+            $simcard = Simcard::query()
+                ->whereKey($simcardId)
+                ->lockForUpdate()
+                ->first();
 
-                if ($legacyUserId !== null && $legacyUserId !== 1 && $legacyUserId !== $userId) {
-                    throw new SimcardOwnershipConflictException(
-                        'The eSIM is assigned to another user.'
-                    );
-                }
+            return $this->detachVerifiedUserSimcard($simcard, $userId);
+        });
+    }
 
-                if ($legacyUserId === $userId && $userId !== 1) {
-                    $this->clearUserReference($simcard);
+    private function detachVerifiedUserSimcard(?Simcard $simcard, int $userId): array
+    {
+        if (! $simcard) {
+            return ['status' => 'not_found', 'simcard' => null];
+        }
 
-                    return [
-                        'status' => 'detached',
-                        'simcard' => $this->safeUserSimcardPayload($simcard->fresh()),
-                    ];
-                }
+        if ($simcard->user_ref === null) {
+            $legacyUserId = $simcard->user_id !== null ? (int) $simcard->user_id : null;
 
-                return [
-                    'status' => 'already_detached',
-                    'simcard' => $this->safeUserSimcardPayload($simcard),
-                ];
-            }
-
-            if (! $this->userReferences->matches(
-                $simcard->user_ref,
-                $userId,
-                $simcard->user_ref_version,
-            )) {
+            if ($legacyUserId !== null && $legacyUserId !== 1 && $legacyUserId !== $userId) {
                 throw new SimcardOwnershipConflictException(
                     'The eSIM is assigned to another user.'
                 );
             }
 
-            $this->clearUserReference($simcard);
+            if ($legacyUserId === $userId && $userId !== 1) {
+                $this->clearUserReference($simcard);
+
+                return [
+                    'status' => 'detached',
+                    'simcard' => $this->safeUserSimcardPayload($simcard->fresh()),
+                ];
+            }
 
             return [
-                'status' => 'detached',
-                'simcard' => $this->safeUserSimcardPayload($simcard->fresh()),
+                'status' => 'already_detached',
+                'simcard' => $this->safeUserSimcardPayload($simcard),
             ];
-        });
+        }
+
+        if (! $this->userReferences->matches(
+            $simcard->user_ref,
+            $userId,
+            $simcard->user_ref_version,
+        )) {
+            throw new SimcardOwnershipConflictException(
+                'The eSIM is assigned to another user.'
+            );
+        }
+
+        $this->clearUserReference($simcard);
+
+        return [
+            'status' => 'detached',
+            'simcard' => $this->safeUserSimcardPayload($simcard->fresh()),
+        ];
     }
 
     /** Detach all eSIM associations for account deletion/privacy workflows. */

@@ -198,9 +198,14 @@ class SimcardController extends Controller
     public function deleteUser(Request $request): JsonResponse
     {
         $this->normalizePlanId($request);
+        $simcardId = trim((string) $request->input('simcard_id', $request->input('id', '')));
+        $request->merge([
+            'simcard_id' => $simcardId !== '' ? $simcardId : null,
+        ]);
 
         $validator = Validator::make($request->all(), [
-            'plan_id' => ['required', 'string', 'regex:/^\d{16}$/'],
+            'simcard_id' => ['nullable', 'uuid', 'required_without:plan_id'],
+            'plan_id' => ['nullable', 'string', 'regex:/^\d{16}$/', 'required_without:simcard_id'],
             'user_id' => ['required', 'integer', 'min:1'],
         ]);
 
@@ -211,10 +216,15 @@ class SimcardController extends Controller
         $data = $validator->validated();
 
         try {
-            $result = $this->simcardService->detachUserByPlanId(
-                planId: $data['plan_id'],
-                userId: (int) $data['user_id'],
-            );
+            $result = isset($data['simcard_id']) && $data['simcard_id'] !== ''
+                ? $this->simcardService->detachUserById(
+                    simcardId: $data['simcard_id'],
+                    userId: (int) $data['user_id'],
+                )
+                : $this->simcardService->detachUserByPlanId(
+                    planId: $data['plan_id'],
+                    userId: (int) $data['user_id'],
+                );
         } catch (SimcardOwnershipConflictException $exception) {
             return $this->ownershipConflict($exception->getMessage());
         }

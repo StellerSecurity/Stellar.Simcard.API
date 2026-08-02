@@ -107,7 +107,27 @@ it('returns conflict instead of reassigning another users simcard', function ():
         ->assertJsonPath('response_code', 409);
 });
 
-it('detaches one simcard only through a verified user request', function (): void {
+it('detaches one simcard by account UUID through a verified user request', function (): void {
+    $this->mock(SimcardService::class, function (MockInterface $mock): void {
+        $mock->shouldReceive('detachUserById')
+            ->once()
+            ->with('00000000-0000-4000-8000-000000000001', 7345)
+            ->andReturn([
+                'status' => 'detached',
+                'simcard' => ['id' => '00000000-0000-4000-8000-000000000001'],
+            ]);
+    });
+
+    $this->withHeaders(simApiBasicAuth())
+        ->deleteJson('/api/v1/sim/user', [
+            'simcard_id' => '00000000-0000-4000-8000-000000000001',
+            'user_id' => 7345,
+        ])
+        ->assertOk()
+        ->assertJsonPath('data.status', 'detached');
+});
+
+it('keeps private SIM ID detach for backwards compatibility', function (): void {
     $this->mock(SimcardService::class, function (MockInterface $mock): void {
         $mock->shouldReceive('detachUserByPlanId')
             ->once()
