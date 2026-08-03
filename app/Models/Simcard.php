@@ -12,7 +12,7 @@ class Simcard extends Model
     public $timestamps = false;
 
     protected $casts = [
-        'purchased_on' => 'date:Y-m-d',
+        'purchased_on' => 'datetime',
         'expires_at' => 'datetime',
         'activated_at' => 'datetime',
         'first_used_at' => 'datetime',

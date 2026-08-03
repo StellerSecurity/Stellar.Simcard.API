@@ -1,0 +1,8 @@
+STELLAR SIM API v2.40.1
+
+- Uses purchased_on as the single canonical purchase timestamp.
+- Fresh databases create purchased_on as TIMESTAMP.
+- Existing production databases convert purchased_on from DATE to TIMESTAMP.
+- If the short-lived v2.40 purchased_at column exists, its precise values are copied into purchased_on and the column is removed.
+- Account lists sort deterministically by purchased_on DESC, then id DESC.
+- Retains all v2.40 ownership, top-up, notification, and fulfillment fixes.

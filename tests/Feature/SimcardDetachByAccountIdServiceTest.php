@@ -40,7 +40,7 @@ function accountLinkedSimcard(SimcardUserReferenceService $references, int $user
         'user_ref_version' => $references->currentVersion(),
         'user_linked_at' => now(),
         'user_link_source' => 'mobile_app',
-        'purchased_on' => now()->toDateString(),
+        'purchased_on' => now(),
     ]);
 }
 

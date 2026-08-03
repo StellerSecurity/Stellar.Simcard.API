@@ -9,7 +9,7 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('simcards', function (Blueprint $table) {
-            $table->date('purchased_on')->nullable()->after('user_id');
+            $table->timestamp('purchased_on')->nullable()->after('user_id');
             $table->index('purchased_on');
         });
     }

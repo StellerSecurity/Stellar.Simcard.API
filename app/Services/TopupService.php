@@ -46,6 +46,8 @@ class TopupService
             throw new RuntimeException('eSIM could not be found.', 404);
         }
 
+        $this->assertTopupEligible($simcard);
+
         // Token creation must not require ICCID.
         // The app only needs a short top-up link here. ICCID/provider readiness is checked later
         // when the token is resolved and when the paid top-up is fulfilled.
@@ -69,6 +71,7 @@ class TopupService
     public function resolve(string $token): array
     {
         [$link, $simcard, $iccid] = $this->resolveValidLink($token);
+        $this->assertTopupEligible($simcard);
 
         $currentPlan = $this->currentPlanForSimcard($simcard);
         $providerPlans = $this->listPlansForResolve($simcard, $iccid);
@@ -122,6 +125,7 @@ class TopupService
     public function checkout(string $token, string $packageCode, array $selectedPlan = []): array
     {
         [$link, $simcard, $iccid] = $this->resolveValidLink($token);
+        $this->assertTopupEligible($simcard);
         $packageCode = $this->normalizePackageCode($packageCode);
 
         if ($iccid === null || trim($iccid) === '') {
@@ -186,6 +190,7 @@ class TopupService
         string $source = 'internal_paid_topup',
     ): array {
         [$link, $simcard, $iccid] = $this->resolveValidLink($token);
+        $this->assertTopupEligible($simcard);
         $packageCode = $this->normalizePackageCode($packageCode);
         $idempotencyKey = trim($idempotencyKey);
         $externalReference = $this->nullableTrimmedString($externalReference, 128);
@@ -259,6 +264,8 @@ class TopupService
         if ($simcard === null) {
             throw new RuntimeException('Top-up eSIM could not be found.', 404);
         }
+
+        $this->assertTopupEligible($simcard);
 
         $iccid = $this->decryptIccid($simcard);
         if ($iccid === null) {
@@ -814,6 +821,25 @@ class TopupService
         }
 
         return $value;
+    }
+
+    private function assertTopupEligible(Simcard $simcard): void
+    {
+        $providerStatus = strtoupper(trim((string) $simcard->esim_status));
+        $fallbackState = strtolower(trim((string) $simcard->state));
+
+        // When the provider has supplied an eSIM status, it is authoritative.
+        // Older records without that field may fall back to the normalized state.
+        $eligible = $providerStatus !== ''
+            ? $providerStatus === 'IN_USE'
+            : $fallbackState === 'active';
+
+        if (! $eligible) {
+            throw new RuntimeException(
+                'Only eSIMs currently in use can be topped up. Install and activate this eSIM first.',
+                409,
+            );
+        }
     }
 
     private function decryptIccid(Simcard $simcard): ?string

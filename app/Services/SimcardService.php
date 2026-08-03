@@ -95,7 +95,7 @@ class SimcardService
                 'commerce_order_item_id' => $commerceOrderItemId,
                 'commerce_unit'          => $commerceUnit,
                 'idempotency_key'        => $idempotencyKey,
-                'purchased_on'           => now()->toDateString(),
+                'purchased_on'           => now(),
             ]);
 
             $this->storeEmailOnSimcard($simcard, $email, $emailSource);
@@ -216,7 +216,7 @@ class SimcardService
                 }
             })
             ->orderByDesc('purchased_on')
-            ->orderBy('id')
+            ->orderByDesc('id')
             ->get()
             ->map(fn (Simcard $simcard): array => $this->safeUserSimcardPayload($simcard))
             ->values()
@@ -466,7 +466,7 @@ class SimcardService
             'remaining_validity' => $simcard->remaining_validity,
             'expires_at' => $simcard->expires_at?->toIso8601String(),
             'activated_at' => $simcard->activated_at?->toIso8601String(),
-            'purchased_on' => $simcard->purchased_on?->format('Y-m-d'),
+            'purchased_on' => $simcard->purchased_on?->toIso8601String(),
         ];
     }
 
