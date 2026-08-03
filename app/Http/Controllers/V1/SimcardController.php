@@ -84,6 +84,9 @@ class SimcardController extends Controller
                     'state' => $result['simcard']->state,
                     'provider' => $result['simcard']->provider,
                     'package_code' => $result['simcard']->package_code,
+                    // Boolean only: confirms ownership was linked without
+                    // exposing the raw user ID or privacy-preserving user_ref.
+                    'account_linked' => $result['simcard']->user_ref !== null,
                 ],
                 'install' => $result['install'],
             ],

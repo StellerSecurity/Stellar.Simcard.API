@@ -44,6 +44,35 @@ it('keeps an order anonymous when user_id is omitted', function (): void {
         ->assertJsonPath('response_code', 201);
 });
 
+it('forwards an authenticated user into eSIM creation and confirms account linkage', function (): void {
+    $simcard = new Simcard();
+    $simcard->state = 'pending';
+    $simcard->provider = 'esimaccess';
+    $simcard->package_code = 'EU-1GB';
+    $simcard->user_ref = 'v1:test-reference';
+
+    $this->mock(SimcardService::class, function (MockInterface $mock) use ($simcard): void {
+        $mock->shouldReceive('orderAndGetInstallInfo')
+            ->once()
+            ->withArgs(fn (?int $userId): bool => $userId === 7345)
+            ->andReturn([
+                'simcard' => $simcard,
+                'install' => ['ac' => null, 'apn' => null],
+            ]);
+    });
+
+    $this->withHeaders(simApiBasicAuth())
+        ->postJson('/api/v1/sim/order', [
+            'plan_id' => '1234 1234 1234 1234',
+            'packageCode' => 'EU-1GB',
+            'user_id' => 7345,
+        ])
+        ->assertCreated()
+        ->assertJsonPath('response_code', 201)
+        ->assertJsonPath('data.simcard.account_linked', true);
+
+});
+
 it('assigns a simcard through the project styled patch route', function (): void {
     $this->mock(SimcardService::class, function (MockInterface $mock): void {
         $mock->shouldReceive('assignUserByPlanId')

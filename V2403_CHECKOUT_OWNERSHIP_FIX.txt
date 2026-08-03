@@ -1,0 +1,1 @@
+v2.40.3 acknowledges account linkage from the idempotent SIM order response. The existing service already creates or repairs user_ref when user_id is supplied.
