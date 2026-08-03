@@ -15,6 +15,7 @@ $service = $root.'/app/Services/SimcardService.php';
 
 requireContains($controller, "'user_id' => ['nullable', 'integer', 'min:1']", 'SIM order user_id validation is missing');
 requireContains($controller, "'account_linked' => \$result['simcard']->user_ref !== null", 'ownership acknowledgement is missing');
+requireContains($controller, "'commerce_fulfillment'", 'Commerce fulfillment ownership source is not accepted');
 requireContains($service, "'user_ref'               => \$userId !== null", 'user_ref is not created during SIM order');
 requireContains($service, "\$this->attachUserReference(\$existing, \$userId, 'purchase')", 'idempotent retry must repair anonymous ownership');
 

@@ -98,6 +98,31 @@ it('assigns a simcard through the project styled patch route', function (): void
         ->assertJsonPath('data.status', 'assigned');
 });
 
+it('accepts the Commerce fulfillment source when repairing ownership', function (): void {
+    $this->mock(SimcardService::class, function (MockInterface $mock): void {
+        $mock->shouldReceive('assignUserByPlanId')
+            ->once()
+            ->with('1234123412341234', 7345, 'commerce_fulfillment')
+            ->andReturn([
+                'status' => 'assigned',
+                'simcard' => [
+                    'id' => '00000000-0000-4000-8000-000000000001',
+                    'package_code' => 'EU-1GB',
+                ],
+            ]);
+    });
+
+    $this->withHeaders(simApiBasicAuth())
+        ->patchJson('/api/v1/sim/user', [
+            'plan_id' => '1234 1234 1234 1234',
+            'user_id' => 7345,
+            'source' => 'commerce_fulfillment',
+        ])
+        ->assertOk()
+        ->assertJsonPath('response_code', 200)
+        ->assertJsonPath('data.status', 'assigned');
+});
+
 it('lists simcards through the project styled user route', function (): void {
     $this->mock(SimcardService::class, function (MockInterface $mock): void {
         $mock->shouldReceive('listByUserId')

@@ -14,6 +14,7 @@ class SimcardController extends Controller
 {
     private const USER_LINK_SOURCES = [
         'purchase',
+        'commerce_fulfillment',
         'manual_claim',
         'account_migration',
         'support',
