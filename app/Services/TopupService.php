@@ -73,8 +73,8 @@ class TopupService
         [$link, $simcard, $iccid] = $this->resolveValidLink($token);
         $this->assertTopupEligible($simcard);
 
-        $currentPlan = $this->currentPlanForSimcard($simcard);
         $providerPlans = $this->listPlansForResolve($simcard, $iccid);
+        $currentPlan = $this->currentPlanForSimcard($simcard);
 
         $normalizedPlans = $this->normalizeTopupPlans($providerPlans);
 
@@ -93,16 +93,13 @@ class TopupService
             'current_plan_location' => $currentPlan !== null ? $this->normalizeLocationList($currentPlan) : [],
         ]);
 
-        $plans = $this->filterPlansForCurrentPackage(
-            $normalizedPlans,
-            $currentPlan
-        );
+        $plans = $this->fixedTopupPlans($normalizedPlans);
 
-        Log::info('Top-up resolve plans filtered.', [
+        Log::info('Top-up resolve fixed plans prepared.', [
             'simcard_id' => (string) $simcard->id,
             'normalized_plan_count' => count($normalizedPlans),
-            'filtered_plan_count' => count($plans),
-            'filtered_package_codes' => array_values(array_filter(array_map(
+            'fixed_plan_count' => count($plans),
+            'fixed_package_codes' => array_values(array_filter(array_map(
                 static fn (array $plan): ?string => isset($plan['package_code']) ? (string) $plan['package_code'] : null,
                 $plans
             ))),
@@ -132,13 +129,13 @@ class TopupService
             throw new RuntimeException('Top-up is not ready yet for this eSIM.', 409);
         }
 
-        $currentPlan = $this->currentPlanForSimcard($simcard);
         $account = $this->resolveProviderAccount($simcard, $iccid);
-        $providerPlans = $this->provider->listPlans(['iccid' => $iccid], $account);
-        $plans = $this->filterPlansForCurrentPackage(
-            $this->normalizeTopupPlans($providerPlans),
-            $currentPlan
-        );
+        $this->assertProviderTopupEligible($iccid, $account);
+        $providerPlans = $this->provider->listPlans([
+            'type' => 'TOPUP',
+            'iccid' => $iccid,
+        ], $account);
+        $plans = $this->fixedTopupPlans($this->normalizeTopupPlans($providerPlans));
         $matchedPlan = $this->findPlanByPackageCode($plans, $packageCode);
 
         if ($matchedPlan === null) {
@@ -209,13 +206,13 @@ class TopupService
             throw new RuntimeException('Top-up is not ready yet for this eSIM.', 409);
         }
 
-        $currentPlan = $this->currentPlanForSimcard($simcard);
         $account = $this->resolveProviderAccount($simcard, $iccid);
-        $providerPlans = $this->provider->listPlans(['iccid' => $iccid], $account);
-        $plans = $this->filterPlansForCurrentPackage(
-            $this->normalizeTopupPlans($providerPlans),
-            $currentPlan
-        );
+        $this->assertProviderTopupEligible($iccid, $account);
+        $providerPlans = $this->provider->listPlans([
+            'type' => 'TOPUP',
+            'iccid' => $iccid,
+        ], $account);
+        $plans = $this->fixedTopupPlans($this->normalizeTopupPlans($providerPlans));
         $matchedPlan = $this->findPlanByPackageCode($plans, $packageCode);
 
         if ($matchedPlan === null) {
@@ -276,13 +273,44 @@ class TopupService
         $transactionId = $this->providerTransactionId($session);
 
         try {
-            // Resolve ownership with a read-only request, then execute the paid top-up once.
+            // Resolve ownership with a read-only request, then revalidate the selected
+            // package against the provider's ICCID-specific TOPUP catalogue.
             $account = $this->resolveProviderAccount($simcard, $iccid);
-            $providerResponse = $this->provider->topup($iccid, (string) $session->package_code, $transactionId, $account);
+            $this->assertProviderTopupEligible($iccid, $account);
+            [$providerPlan, $providerTopupValue] = $this->resolveProviderPlanForFulfillment(
+                $session,
+                $iccid,
+                $account,
+            );
+
+            $providerResponse = $this->provider->topup($iccid, $providerTopupValue, $transactionId, $account);
             $redactedProviderResponse = $this->redactProviderPayload($providerResponse);
 
             if (! $this->providerTopupSucceeded($providerResponse)) {
                 $failureReason = $this->providerFailureReason($providerResponse);
+
+                if ($this->providerTopupFailureIsRetryable($providerResponse)) {
+                    // Payment has already completed at this point. Keep the session retryable
+                    // instead of permanently failing because the supplier wallet is low.
+                    $session->status = self::STATUS_PAID;
+                    $session->commerce_order_id = $commerceOrderId ?: $session->commerce_order_id;
+                    $session->commerce_order_item_id = $commerceOrderItemId ?: $session->commerce_order_item_id;
+                    $session->paid_at = $session->paid_at ?: now();
+                    $session->supplier_reference = null;
+                    $session->fulfilled_at = null;
+                    $session->failure_reason = 'Retryable top-up fulfillment error: ' . $failureReason;
+                    $session->meta = array_merge((array) $session->meta, [
+                        'provider_result_redacted' => $redactedProviderResponse,
+                        'provider_transaction_id' => $transactionId,
+                        'provider_topup_value' => $providerTopupValue,
+                        'provider_fulfillment_plan' => $this->safePlanPayload($providerPlan),
+                        'last_retryable_error' => $failureReason,
+                        'last_retryable_error_at' => now()->toIso8601String(),
+                    ]);
+                    $session->save();
+
+                    throw new RuntimeException($failureReason, 503);
+                }
 
                 $session->status = self::STATUS_FAILED;
                 $session->commerce_order_id = $commerceOrderId ?: $session->commerce_order_id;
@@ -293,6 +321,8 @@ class TopupService
                 $session->meta = array_merge((array) $session->meta, [
                     'provider_result_redacted' => $redactedProviderResponse,
                     'provider_transaction_id' => $transactionId,
+                    'provider_topup_value' => $providerTopupValue,
+                    'provider_fulfillment_plan' => $this->safePlanPayload($providerPlan),
                 ]);
                 $session->save();
 
@@ -313,6 +343,8 @@ class TopupService
             $session->meta = array_merge((array) $session->meta, array_filter([
                 'provider_result_redacted' => $redactedProviderResponse,
                 'provider_transaction_id' => $transactionId,
+                'provider_topup_value' => $providerTopupValue,
+                'provider_fulfillment_plan' => $this->safePlanPayload($providerPlan),
                 'provider_topup_esim_tran_no' => $providerTopupReference,
                 'provider_order_no' => $providerOrderReference,
                 'support_reference' => $supplierReference,
@@ -331,7 +363,12 @@ class TopupService
             $providerHttpStatus = $this->providerExceptionHttpStatus($exception);
             $runtimeStatus = $exception instanceof RuntimeException ? (int) $exception->getCode() : 0;
 
-            if ($this->isRetryableProviderException($exception) || $providerHttpStatus === 429 || $providerHttpStatus >= 500) {
+            if (
+                $this->isRetryableProviderException($exception)
+                || $runtimeStatus >= 500
+                || $providerHttpStatus === 429
+                || $providerHttpStatus >= 500
+            ) {
                 // Do not permanently fail paid top-ups on provider/network timeouts.
                 // Commerce can retry with the same provider transaction id.
                 $session->failure_reason = 'Retryable top-up fulfillment error: ' . $exception->getMessage();
@@ -431,6 +468,7 @@ class TopupService
 
         try {
             $account = $this->resolveProviderAccount($simcard, $iccid);
+            $this->assertProviderTopupEligible($iccid, $account);
 
             Log::info('Requesting top-up plans from provider.', [
                 'simcard_id' => (string) $simcard->id,
@@ -439,10 +477,13 @@ class TopupService
                 'package_code' => (string) $simcard->package_code,
                 'has_iccid' => true,
                 'iccid_last4' => strlen($iccid) >= 4 ? substr($iccid, -4) : null,
-                'filter_keys' => ['iccid'],
+                'filter_keys' => ['type', 'iccid'],
             ]);
 
-            $response = $this->provider->listPlans(['iccid' => $iccid], $account);
+            $response = $this->provider->listPlans([
+                'type' => 'TOPUP',
+                'iccid' => $iccid,
+            ], $account);
 
             Log::info('Provider top-up plan response received.', [
                 'simcard_id' => (string) $simcard->id,
@@ -478,13 +519,16 @@ class TopupService
         }
     }
 
-    private function currentPlanForSimcard(Simcard $simcard): ?array
+    private function currentPlanForSimcard(Simcard $simcard, ?string $account = null): ?array
     {
         $packageCode = is_string($simcard->package_code) ? trim($simcard->package_code) : '';
 
         if ($packageCode !== '') {
             try {
-                $response = $this->provider->listPlans(['packageCode' => $packageCode], $this->preferredProviderAccount($simcard));
+                $response = $this->provider->listPlans([
+                    'type' => 'BASE',
+                    'packageCode' => $packageCode,
+                ], $account ?? $this->preferredProviderAccount($simcard));
                 $packages = $this->extractPackageList($response);
 
                 foreach ($packages as $package) {
@@ -771,6 +815,101 @@ class TopupService
         return $exception instanceof ConnectionException;
     }
 
+    private function assertProviderTopupEligible(string $iccid, string $account): void
+    {
+        $response = $this->provider->queryEsim(null, $iccid, $account);
+        $esim = Arr::get($response, 'obj.esimList.0');
+
+        if (! is_array($esim)) {
+            throw new RuntimeException('The eSIM could not be verified for top-up.', 409);
+        }
+
+        $status = strtoupper(trim((string) ($esim['esimStatus'] ?? '')));
+        if ($status !== '' && str_contains($status, 'EXPIRED')) {
+            throw new RuntimeException('This eSIM has expired and can no longer be topped up.', 409);
+        }
+
+        $expiredTime = trim((string) ($esim['expiredTime'] ?? ''));
+        if ($expiredTime !== '') {
+            $expiresAt = strtotime($expiredTime);
+
+            if ($expiresAt !== false && $expiresAt <= time()) {
+                throw new RuntimeException('This eSIM has expired and can no longer be topped up.', 409);
+            }
+        }
+    }
+
+    /**
+     * Resolve the provider-authoritative top-up value for a stored session.
+     *
+     * Public Stellar package codes remain slugs for backward compatibility, while
+     * fulfillment uses the compatible TOPUP_* code returned for this exact ICCID.
+     *
+     * @return array{0: array<string,mixed>, 1: string}
+     */
+    private function resolveProviderPlanForFulfillment(
+        SimcardTopupSession $session,
+        string $iccid,
+        string $account,
+    ): array {
+        $providerResponse = $this->provider->listPlans([
+            'type' => 'TOPUP',
+            'iccid' => $iccid,
+        ], $account);
+
+        // eSIMAccess defines TOPUP + ICCID as the authoritative compatibility query.
+        // Do not re-filter those provider-approved recharge packages using BASE package
+        // metadata such as supportTopUpType or location; that can reject valid TOPUP_* rows.
+        $plans = $this->fixedTopupPlans($this->normalizeTopupPlans($providerResponse));
+
+        $requestedCodes = array_values(array_unique(array_filter([
+            $this->nullableTrimmedString((string) $session->package_code, 128),
+            $this->nullableTrimmedString((string) Arr::get((array) $session->meta, 'plan.package_code', ''), 128),
+            $this->nullableTrimmedString((string) Arr::get((array) $session->meta, 'plan.provider_topup_slug', ''), 128),
+            $this->nullableTrimmedString((string) Arr::get((array) $session->meta, 'plan.provider_topup_value', ''), 128),
+        ])));
+
+        $matchedPlan = null;
+        foreach ($requestedCodes as $requestedCode) {
+            $matchedPlan = $this->findPlanByPackageCode($plans, $requestedCode);
+            if ($matchedPlan !== null) {
+                break;
+            }
+        }
+
+        if ($matchedPlan === null) {
+            throw new RuntimeException('Selected top-up package is no longer available for this eSIM.', 409);
+        }
+
+        $providerTopupValue = $this->stringFromKeys($matchedPlan, [
+            'provider_topup_value',
+            'provider_topup_code',
+            'provider_topup_slug',
+            'package_code',
+        ]);
+
+        if ($providerTopupValue === null) {
+            throw new RuntimeException('The provider top-up package could not be resolved.', 409);
+        }
+
+        return [$matchedPlan, $providerTopupValue];
+    }
+
+    private function providerTopupFailureIsRetryable(array $payload): bool
+    {
+        $errorCode = (string) (
+            Arr::get($payload, 'errorCode')
+            ?? Arr::get($payload, 'code')
+            ?? Arr::get($payload, 'data.errorCode')
+            ?? Arr::get($payload, 'obj.errorCode')
+            ?? ''
+        );
+
+        // eSIMAccess 200007 means the merchant/provider balance is insufficient.
+        // The customer payment must remain retryable after supplier balance recovery.
+        return $errorCode === '200007';
+    }
+
     private function normalizeToken(string $token): string
     {
         $token = trim($token);
@@ -938,12 +1077,12 @@ class TopupService
             $explicitTopupPackageCode = $this->firstTopupPackageCode($package, $providerSalePackageCode);
 
             if ($explicitTopupPackageCode !== null) {
-                $topupValue = $explicitTopupPackageCode;
+                $providerTopupValue = $explicitTopupPackageCode;
                 $topupValueType = 'package_code';
             } elseif ($slug !== null) {
-                // eSIMAccess top-up still expects the HTTP field name packageCode.
-                // The value may be either a recharge code starting with TOPUP_ or the package slug.
-                $topupValue = $slug;
+                // A slug is accepted by eSIMAccess for a compatible TOPUP result.
+                // It must never be taken from the unfiltered BASE catalogue.
+                $providerTopupValue = $slug;
                 $topupValueType = 'slug';
             } else {
                 Log::debug('Provider package skipped because no top-up value or slug was found.', [
@@ -951,21 +1090,24 @@ class TopupService
                     'package_keys' => array_keys($package),
                 ]);
 
-                // Normal sale codes like CKH166 / CKH082 / CKH168 are not valid recharge values.
                 continue;
             }
 
-            $plan = $this->normalizeProviderPlan($package, $topupValue);
-            $plan['package_code'] = $topupValue;
-            $plan['code'] = $topupValue;
-            $plan['sku'] = $topupValue;
-            $plan['provider_topup_value'] = $topupValue;
-            $plan['provider_topup_code'] = $topupValueType === 'package_code' ? $topupValue : null;
-            $plan['provider_topup_slug'] = $topupValueType === 'slug' ? $topupValue : null;
+            // Preserve the public slug used by existing Stellar clients while retaining the
+            // provider-authoritative TOPUP_* package code for fulfillment.
+            $publicPackageCode = $slug ?? $providerTopupValue;
+
+            $plan = $this->normalizeProviderPlan($package, $publicPackageCode);
+            $plan['package_code'] = $publicPackageCode;
+            $plan['code'] = $publicPackageCode;
+            $plan['sku'] = $publicPackageCode;
+            $plan['provider_topup_value'] = $providerTopupValue;
+            $plan['provider_topup_code'] = $explicitTopupPackageCode;
+            $plan['provider_topup_slug'] = $slug;
             $plan['provider_sale_package_code'] = $providerSalePackageCode;
             $plan['topup_payload_type'] = $topupValueType;
             $plan['topup_payload_field'] = 'packageCode';
-            $plan['is_explicit_provider_topup_code'] = $topupValueType === 'package_code';
+            $plan['is_explicit_provider_topup_code'] = $explicitTopupPackageCode !== null;
 
             $plans[] = array_filter($plan, static fn ($value) => $value !== null && $value !== '');
         }
@@ -993,6 +1135,10 @@ class TopupService
         $location = $this->stringFromKeys($package, ['location']);
         $locationName = $this->stringFromKeys($package, ['locationName', 'locationNetworkList.0.locationName']);
         $speed = $this->stringFromKeys($package, ['speed']);
+        $providerPackageCode = $this->stringFromKeys($package, ['packageCode', 'package_code', 'code', 'sku']);
+        $providerSlug = $this->stringFromKeys($package, ['slug', 'packageSlug', 'package_slug']);
+        $supportTopupType = $this->intFromKeys($package, ['supportTopUpType', 'support_top_up_type', 'support_topup_type']);
+        $dataType = $this->intFromKeys($package, ['dataType', 'data_type']);
 
         return array_filter([
             'package_code' => $fallbackCode,
@@ -1014,6 +1160,10 @@ class TopupService
             'location' => $location,
             'location_name' => $locationName,
             'speed' => $speed,
+            'provider_package_code' => $providerPackageCode,
+            'provider_slug' => $providerSlug,
+            'support_topup_type' => $supportTopupType,
+            'data_type' => $dataType,
             'raw' => $package,
         ], static fn ($value) => $value !== null && $value !== '');
     }
@@ -1125,43 +1275,15 @@ class TopupService
         return $shape;
     }
 
-    private function filterPlansForCurrentPackage(array $plans, ?array $currentPlan): array
+    private function fixedTopupPlans(array $plans): array
     {
-        if ($plans === []) {
-            return [];
-        }
-
-        if ($currentPlan === null) {
-            return [];
-        }
-
-        $currentLocationCode = $this->planLocationCode($currentPlan);
-        $currentLocation = $this->normalizeLocationList($currentPlan);
-
-        if ($currentLocationCode === null && $currentLocation === []) {
-            return [];
-        }
-
-        $filtered = [];
-
-        foreach ($plans as $plan) {
-            $planLocationCode = $this->planLocationCode($plan);
-            $planLocation = $this->normalizeLocationList($plan);
-
-            $sameLocationCode = $currentLocationCode !== null
-                && $planLocationCode !== null
-                && strtoupper($planLocationCode) === strtoupper($currentLocationCode);
-
-            $sameExactLocationSet = $currentLocation !== []
-                && $planLocation !== []
-                && $currentLocation === $planLocation;
-
-            if ($sameLocationCode || $sameExactLocationSet) {
-                $filtered[] = $plan;
-            }
-        }
-
-        return array_values($filtered);
+        // TOPUP + ICCID already returns packages compatible with that eSIM.
+        // This flow intentionally handles fixed-data plans only; Day Pass plans use
+        // the separate esimTranNo + base slug + periodNum contract.
+        return array_values(array_filter(
+            $plans,
+            static fn (array $plan): bool => (int) ($plan['data_type'] ?? 0) === 1
+        ));
     }
 
     private function planLocationCode(array $plan): ?string
@@ -1217,10 +1339,21 @@ class TopupService
     private function findPlanByPackageCode(array $plans, string $packageCode): ?array
     {
         foreach ($plans as $plan) {
-            $candidate = (string) ($plan['package_code'] ?? $plan['code'] ?? $plan['sku'] ?? '');
+            foreach ([
+                'package_code',
+                'code',
+                'sku',
+                'provider_topup_value',
+                'provider_topup_code',
+                'provider_topup_slug',
+                'provider_package_code',
+                'provider_slug',
+            ] as $key) {
+                $candidate = $plan[$key] ?? null;
 
-            if ($candidate === $packageCode) {
-                return $plan;
+                if (is_string($candidate) && $candidate !== '' && hash_equals($candidate, $packageCode)) {
+                    return $plan;
+                }
             }
         }
 
