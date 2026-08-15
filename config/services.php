@@ -41,6 +41,10 @@ return [
 
     'stellar_commerce' => [
         'topup_checkout_url' => env('STELLAR_COMMERCE_TOPUP_CHECKOUT_URL'),
+        'auto_topup_charge_url' => env(
+            'STELLAR_COMMERCE_AUTO_TOPUP_CHARGE_URL',
+            'https://stellarcommerceapiprod.azurewebsites.net/api/v1/esimautotopupcontroller/charge'
+        ),
         'username' => env('APPSETTING_API_USERNAME_STELLAR_COMMERCE_API'),
         'password' => env('APPSETTING_API_PASSWORD_STELLAR_COMMERCE_API'),
     ],

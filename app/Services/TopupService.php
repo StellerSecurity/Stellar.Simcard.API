@@ -239,6 +239,110 @@ class TopupService
         ];
     }
 
+    /**
+     * Prepare an idempotent provider-validated session for Auto Top-Up.
+     * No payment is made here. Commerce remains the only owner of card charges.
+     */
+    public function prepareAutoTopupSession(
+        Simcard $simcard,
+        int $preferredDataBytes,
+        ?int $preferredDurationDays,
+        string $attemptKey,
+    ): SimcardTopupSession {
+        $this->assertAutoTopupEligible($simcard);
+
+        if ($preferredDataBytes <= 0) {
+            throw new RuntimeException('Auto Top-Up data allowance is invalid.', 422);
+        }
+
+        $attemptKey = trim($attemptKey);
+        if (strlen($attemptKey) < 16 || strlen($attemptKey) > 128) {
+            throw new RuntimeException('Auto Top-Up attempt key is invalid.', 422);
+        }
+
+        $iccid = $this->decryptIccid($simcard);
+        if ($iccid === null || trim($iccid) === '') {
+            throw new RuntimeException('Auto Top-Up is not ready for this eSIM yet.', 409);
+        }
+
+        $account = $this->resolveProviderAccount($simcard, $iccid);
+        $this->assertProviderTopupEligible($iccid, $account);
+        $providerPlans = $this->provider->listPlans([
+            'type' => 'TOPUP',
+            'iccid' => $iccid,
+        ], $account);
+        $plans = $this->fixedTopupPlans($this->normalizeTopupPlans($providerPlans));
+
+        $toleranceBytes = max(1024 * 1024, (int) round($preferredDataBytes * 0.005));
+        $matches = array_values(array_filter($plans, static function (array $plan) use ($preferredDataBytes, $toleranceBytes): bool {
+            $dataBytes = $plan['data_bytes'] ?? null;
+
+            return is_numeric($dataBytes)
+                && abs((int) $dataBytes - $preferredDataBytes) <= $toleranceBytes;
+        }));
+
+        if ($preferredDurationDays !== null && $preferredDurationDays > 0 && count($matches) > 1) {
+            usort($matches, static function (array $left, array $right) use ($preferredDurationDays): int {
+                $leftDays = (int) ($left['duration_days'] ?? $left['validity_days'] ?? 0);
+                $rightDays = (int) ($right['duration_days'] ?? $right['validity_days'] ?? 0);
+
+                return abs($leftDays - $preferredDurationDays) <=> abs($rightDays - $preferredDurationDays);
+            });
+        }
+
+        $matchedPlan = $matches[0] ?? null;
+        if ($matchedPlan === null) {
+            throw new RuntimeException('No compatible top-up with the same data allowance is available for this eSIM.', 422);
+        }
+
+        $packageCode = $this->normalizePackageCode((string) ($matchedPlan['package_code'] ?? ''));
+        $sessionIdempotencyKey = hash('sha256', 'simcard-auto-topup-session|' . $attemptKey);
+
+        return DB::transaction(function () use (
+            $simcard,
+            $matchedPlan,
+            $packageCode,
+            $attemptKey,
+            $sessionIdempotencyKey,
+        ): SimcardTopupSession {
+            $existing = SimcardTopupSession::query()
+                ->where('idempotency_key', $sessionIdempotencyKey)
+                ->lockForUpdate()
+                ->first();
+
+            if ($existing !== null) {
+                if ((string) $existing->simcard_id !== (string) $simcard->id) {
+                    throw new RuntimeException('Auto Top-Up attempt key was already used for another eSIM.', 409);
+                }
+
+                return $existing;
+            }
+
+            $session = new SimcardTopupSession();
+            $session->id = (string) Str::uuid();
+            $session->simcard_id = (string) $simcard->id;
+            $session->action_link_id = null;
+            $session->package_code = $packageCode;
+            $session->package_name = (string) ($matchedPlan['name'] ?? $matchedPlan['package_name'] ?? $packageCode);
+            $session->data_bytes = (int) ($matchedPlan['data_bytes'] ?? 0);
+            $session->duration_days = isset($matchedPlan['duration_days']) ? (int) $matchedPlan['duration_days'] : null;
+            $session->price_cents = (int) ($matchedPlan['price_cents'] ?? $matchedPlan['unit_price_cents'] ?? 0);
+            $session->currency = strtoupper((string) ($matchedPlan['currency'] ?? 'EUR'));
+            $session->status = self::STATUS_PENDING_PAYMENT;
+            $session->idempotency_key = $sessionIdempotencyKey;
+            $session->meta = [
+                'source' => 'esim_auto_topup',
+                'attempt_key_hash' => hash('sha256', $attemptKey),
+                'plan' => $this->safePlanPayload($matchedPlan),
+                'simcard_snapshot' => $this->safeSimPayload($simcard),
+            ];
+            $session->requested_at = now();
+            $session->save();
+
+            return $session;
+        });
+    }
+
     public function fulfill(string $topupSessionId, ?string $commerceOrderId = null, ?string $commerceOrderItemId = null, ?string $idempotencyKey = null): array
     {
         $topupSessionId = $this->normalizeUuid($topupSessionId, 'Top-up session id is invalid.');
@@ -960,6 +1064,13 @@ class TopupService
         }
 
         return $value;
+    }
+
+    private function assertAutoTopupEligible(Simcard $simcard): void
+    {
+        if (strtoupper(trim((string) $simcard->esim_status)) !== 'IN_USE') {
+            throw new RuntimeException('Auto Top-Up only runs while the eSIM is IN_USE.', 409);
+        }
     }
 
     private function assertTopupEligible(Simcard $simcard): void

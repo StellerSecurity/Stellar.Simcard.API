@@ -4,6 +4,7 @@ namespace App\Http\Controllers\V1;
 
 use App\Http\Controllers\Controller;
 use App\Services\TopupService;
+use App\Services\EsimAutoTopupService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
@@ -14,6 +15,7 @@ class TopupController extends Controller
 {
     public function __construct(
         private readonly TopupService $topupService,
+        private readonly EsimAutoTopupService $autoTopupService,
     ) {}
 
 
@@ -168,14 +170,23 @@ class TopupController extends Controller
                 'idempotency_key' => ['nullable', 'string', 'max:128'],
             ]);
 
+            $result = $this->topupService->fulfill(
+                topupSessionId: (string) $validated['topup_session_id'],
+                commerceOrderId: $validated['commerce_order_id'] ?? null,
+                commerceOrderItemId: $validated['commerce_order_item_id'] ?? null,
+                idempotencyKey: $validated['idempotency_key'] ?? null,
+            );
+
+            // No-op for manual top-ups. For Auto Top-Up this moves the cycle to
+            // WAITING_REARM only after the provider fulfillment actually succeeded.
+            $this->autoTopupService->markFulfilled(
+                (string) $validated['topup_session_id'],
+                $validated['commerce_order_id'] ?? null,
+            );
+
             return response()->json([
                 'response_code' => 200,
-                'data' => $this->topupService->fulfill(
-                    topupSessionId: (string) $validated['topup_session_id'],
-                    commerceOrderId: $validated['commerce_order_id'] ?? null,
-                    commerceOrderItemId: $validated['commerce_order_item_id'] ?? null,
-                    idempotencyKey: $validated['idempotency_key'] ?? null,
-                ),
+                'data' => $result,
             ], 200);
         } catch (ValidationException $exception) {
             return response()->json([

@@ -3,6 +3,7 @@
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\V1\SimcardController;
 use App\Http\Controllers\V1\TopupController;
+use App\Http\Controllers\V1\EsimAutoTopupController;
 use App\Http\Controllers\V1\Webhooks\EsimaccessWebhookController;
 
 Route::post('v1/webhooks/esimaccess', EsimaccessWebhookController::class);
@@ -16,6 +17,13 @@ Route::prefix('v1/topupcontroller')
         Route::post('/checkout', [TopupController::class, 'checkout']);
         Route::post('/prepare', [TopupController::class, 'prepare']);
         Route::post('/fulfill', [TopupController::class, 'fulfill']);
+    });
+
+
+Route::prefix('v1/autotopupcontroller')
+    ->middleware('stellar.sim.basic')
+    ->group(function () {
+        Route::post('/payment-failed', [EsimAutoTopupController::class, 'paymentFailed']);
     });
 
 Route::prefix('v1/sim')

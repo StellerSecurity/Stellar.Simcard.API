@@ -1,6 +1,7 @@
 <?php
 
 use App\Services\Esim\EsimMarketingRefundOfferService;
+use App\Services\EsimAutoTopupService;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Schedule;
@@ -27,3 +28,27 @@ Artisan::command('esim:dispatch-marketing-refund-offers {--limit=100}', function
 Schedule::command('esim:dispatch-marketing-refund-offers')
     ->everyFifteenMinutes()
     ->withoutOverlapping();
+
+Artisan::command('esim:process-auto-topups {--limit=100}', function () {
+    $summary = app(EsimAutoTopupService::class)
+        ->processPending((int) $this->option('limit'));
+
+    $this->info(sprintf(
+        'Processed: %d, triggered: %d, skipped: %d, failed: %d; notifications processed: %d, sent: %d, skipped: %d, failed: %d',
+        $summary['processed'],
+        $summary['triggered'],
+        $summary['skipped'],
+        $summary['failed'],
+        $summary['notifications_processed'],
+        $summary['notifications_sent'],
+        $summary['notifications_skipped'],
+        $summary['notifications_failed'],
+    ));
+
+    return $summary['failed'] > 0 ? 1 : 0;
+})->purpose('Process eligible and retryable eSIM Auto Top-Up cycles');
+
+Schedule::command('esim:process-auto-topups')
+    ->everyFiveMinutes()
+    ->withoutOverlapping();
+

@@ -5,10 +5,13 @@ namespace App\Http\Controllers\V1;
 use App\Exceptions\SimcardOwnershipConflictException;
 use App\Http\Controllers\Controller;
 use App\Services\SimcardService;
+use App\Services\EsimAutoTopupService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
+use Throwable;
 
 class SimcardController extends Controller
 {
@@ -24,6 +27,7 @@ class SimcardController extends Controller
 
     public function __construct(
         private readonly SimcardService $simcardService,
+        private readonly EsimAutoTopupService $autoTopupService,
     ) {}
 
     public function plans(Request $request): JsonResponse
@@ -53,6 +57,9 @@ class SimcardController extends Controller
             'commerce_order_item_id' => ['nullable', 'string', 'max:64'],
             'commerce_unit' => ['nullable', 'integer', 'min:1', 'max:99'],
             'idempotency_key' => ['nullable', 'string', 'max:128'],
+            // Auto Top-Up is optional and must never alter normal eSIM ordering.
+            // Its nested values are normalized after the provider order succeeds.
+            'auto_topup' => ['nullable', 'array'],
         ]);
 
         if ($validator->fails()) {
@@ -78,6 +85,25 @@ class SimcardController extends Controller
             return $this->ownershipConflict($exception->getMessage());
         }
 
+        $autoTopupConfigured = false;
+        $autoTopup = $data['auto_topup'] ?? null;
+
+        if (is_array($autoTopup) && filter_var($autoTopup['enabled'] ?? false, FILTER_VALIDATE_BOOLEAN)) {
+            try {
+                $this->autoTopupService->configureForSimcard($result['simcard'], $autoTopup);
+                $autoTopupConfigured = true;
+            } catch (Throwable $exception) {
+                // Auto Top-Up is additive. A configuration problem must never turn a
+                // successfully purchased/provider-created eSIM into a failed fulfillment.
+                Log::error('eSIM was provisioned but Auto Top-Up configuration failed.', [
+                    'simcard_id' => (string) $result['simcard']->id,
+                    'commerce_order_id' => (string) ($result['simcard']->commerce_order_id ?? ''),
+                    'commerce_order_item_id' => (string) ($result['simcard']->commerce_order_item_id ?? ''),
+                    'exception' => basename(str_replace('\\', '/', get_class($exception))),
+                ]);
+            }
+        }
+
         return response()->json([
             'response_code' => 201,
             'data' => [
@@ -88,6 +114,7 @@ class SimcardController extends Controller
                     // Boolean only: confirms ownership was linked without
                     // exposing the raw user ID or privacy-preserving user_ref.
                     'account_linked' => $result['simcard']->user_ref !== null,
+                    'auto_topup_configured' => $autoTopupConfigured,
                 ],
                 'install' => $result['install'],
             ],

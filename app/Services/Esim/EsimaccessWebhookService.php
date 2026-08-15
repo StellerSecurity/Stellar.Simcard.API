@@ -4,6 +4,8 @@ namespace App\Services\Esim;
 
 use App\Models\EsimWebhookEvent;
 use App\Models\Simcard;
+use App\Models\SimcardAutoTopup;
+use App\Services\EsimAutoTopupService;
 use App\Services\SimcardActionLinkService;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
@@ -35,6 +37,7 @@ class EsimaccessWebhookService
         private readonly EsimProvider $provider,
         private readonly SimcardActionLinkService $actionLinks,
         private readonly EsimMarketingRefundOfferService $marketingRefundOffer,
+        private readonly EsimAutoTopupService $autoTopupService,
     ) {}
 
     public function handle(array $payload): array
@@ -152,6 +155,23 @@ class EsimaccessWebhookService
 
         if (($result['status'] ?? null) === 'processed') {
             $this->queueMarketingRefundOfferIfUsageDetected($notifyType, $content, $result);
+
+            if ($notifyType === 'DATA_USAGE' && ! empty($result['simcard_id'])) {
+                try {
+                    $result['auto_topup'] = $this->autoTopupService->processUsage((string) $result['simcard_id']);
+                } catch (Throwable $exception) {
+                    // The provider webhook itself is already persisted successfully.
+                    // Auto Top-Up retries from stored usage and must not fail the webhook.
+                    Log::warning('eSIM Auto Top-Up trigger failed after DATA_USAGE webhook.', [
+                        'simcard_id' => (string) $result['simcard_id'],
+                        'exception' => $this->safeExceptionName($exception),
+                    ]);
+                    $result['auto_topup'] = [
+                        'status' => 'retryable',
+                        'reason' => 'trigger_processing_failed',
+                    ];
+                }
+            }
 
             $sms = $this->sendWebhookSmsIfNeeded($notifyType, $content, $result);
 
@@ -386,6 +406,13 @@ class EsimaccessWebhookService
             ];
         }
 
+        if ($notifyType === 'DATA_USAGE' && $this->shouldSuppressManualLowDataPrompt($simcard)) {
+            return [
+                'status' => 'skipped',
+                'reason' => 'auto_topup_active',
+            ];
+        }
+
         $message = $this->smsMessageForWebhook($notifyType, $content, $simcard, $this->nullableString($result['webhook_event_id'] ?? null));
 
         if ($message === null) {
@@ -420,14 +447,14 @@ class EsimaccessWebhookService
 
         if ($notifyType === 'DATA_USAGE') {
             $url = $this->actionLinks->createTopupUrl($simcard, 'data_low', $webhookEventId);
-            $planPhrase = $this->safePlanPhraseForSms($content);
+            $planPhrase = $this->safePlanPhraseForSms($content, $simcard);
 
             return 'Your Stellar eSIM' . $planPhrase . ' is almost out of data. Top up here: ' . $url;
         }
 
         if ($notifyType === 'VALIDITY_USAGE') {
             $url = $this->actionLinks->createTopupUrl($simcard, 'validity_expiring', $webhookEventId);
-            $planPhrase = $this->safePlanPhraseForSms($content);
+            $planPhrase = $this->safePlanPhraseForSms($content, $simcard);
 
             return 'Your Stellar eSIM' . $planPhrase . ' expires soon. Extend or buy another plan here: ' . $url;
         }
@@ -445,6 +472,13 @@ class EsimaccessWebhookService
             return [
                 'status' => 'skipped',
                 'reason' => 'missing_simcard',
+            ];
+        }
+
+        if ($notifyType === 'DATA_USAGE' && $this->shouldSuppressManualLowDataPrompt($simcard)) {
+            return [
+                'status' => 'skipped',
+                'reason' => 'auto_topup_active',
             ];
         }
 
@@ -556,6 +590,15 @@ class EsimaccessWebhookService
         return null;
     }
 
+    private function shouldSuppressManualLowDataPrompt(Simcard $simcard): bool
+    {
+        return SimcardAutoTopup::query()
+            ->where('simcard_id', $simcard->id)
+            ->where('enabled', true)
+            ->where('state', '!=', 'PAUSED')
+            ->exists();
+    }
+
     private function resolveSimcardEmail(Simcard $simcard): ?string
     {
         if (empty($simcard->email_enc)) {
@@ -582,7 +625,7 @@ class EsimaccessWebhookService
         return $email;
     }
 
-    private function safePlanPhraseForSms(array $content): string
+    private function safePlanPhraseForSms(array $content, Simcard $simcard): string
     {
         $label = $this->resolveSafePackageLabelForSms($content, $simcard);
 

@@ -1,0 +1,848 @@
+<?php
+
+namespace App\Services;
+
+use App\Models\Simcard;
+use App\Models\SimcardAutoTopup;
+use App\Models\SimcardAutoTopupAttempt;
+use App\Models\SimcardTopupSession;
+use App\Services\Esim\EsimCryptoService;
+use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
+use RuntimeException;
+use StellarSecurity\Notifications\DTO\NotificationEvent;
+use StellarSecurity\Notifications\Facades\Notification;
+use Throwable;
+
+class EsimAutoTopupService
+{
+    private const TRIGGER_PERCENT = 35;
+    private const STATE_ARMED = 'ARMED';
+    private const STATE_PROCESSING = 'PROCESSING';
+    private const STATE_WAITING_REARM = 'WAITING_REARM';
+    private const STATE_PAUSED = 'PAUSED';
+
+    private const ATTEMPT_CLAIMED = 'CLAIMED';
+    private const ATTEMPT_RETRYABLE = 'RETRYABLE';
+    private const ATTEMPT_PAYMENT_PENDING = 'PAYMENT_PENDING';
+    private const ATTEMPT_FULFILLED = 'FULFILLED';
+    private const ATTEMPT_FAILED = 'FAILED';
+
+    public function __construct(
+        private readonly TopupService $topupService,
+        private readonly EsimCryptoService $crypto,
+    ) {}
+
+    /**
+     * Persist Auto Top-Up against the concrete provisioned eSIM.
+     * The caller never controls the trigger percentage.
+     */
+    public function configureForSimcard(Simcard $simcard, array $payload): SimcardAutoTopup
+    {
+        if (! filter_var($payload['enabled'] ?? false, FILTER_VALIDATE_BOOLEAN)) {
+            throw new RuntimeException('Auto Top-Up configuration is not enabled.', 422);
+        }
+
+        $parentOrderId = $this->uuid((string) ($payload['parent_commerce_order_id'] ?? ''), 'Auto Top-Up parent order id is invalid.');
+        $parentOrderItemId = $this->uuid((string) ($payload['parent_commerce_order_item_id'] ?? ''), 'Auto Top-Up parent order item id is invalid.');
+        $commerceUnit = max(1, (int) ($payload['commerce_unit'] ?? 1));
+        $preferredDataBytes = (int) ($payload['preferred_data_bytes'] ?? 0);
+        $preferredDurationDays = isset($payload['preferred_duration_days']) ? (int) $payload['preferred_duration_days'] : null;
+
+        if ($preferredDataBytes <= 0) {
+            throw new RuntimeException('Auto Top-Up data allowance is invalid.', 422);
+        }
+
+        if (
+            (string) $simcard->commerce_order_id !== $parentOrderId
+            || (string) $simcard->commerce_order_item_id !== $parentOrderItemId
+            || (int) $simcard->commerce_unit !== $commerceUnit
+        ) {
+            throw new RuntimeException('Auto Top-Up Commerce ownership does not match the provisioned eSIM.', 409);
+        }
+
+        return DB::transaction(function () use (
+            $simcard,
+            $parentOrderId,
+            $parentOrderItemId,
+            $commerceUnit,
+            $preferredDataBytes,
+            $preferredDurationDays,
+        ): SimcardAutoTopup {
+            $config = SimcardAutoTopup::query()
+                ->where('simcard_id', $simcard->id)
+                ->lockForUpdate()
+                ->first();
+
+            if ($config === null) {
+                $config = new SimcardAutoTopup();
+                $config->id = (string) Str::uuid();
+                $config->simcard_id = (string) $simcard->id;
+                $config->cycle = 1;
+                $config->state = self::STATE_ARMED;
+            }
+
+            if (
+                $config->exists
+                && (
+                    (string) $config->parent_commerce_order_id !== $parentOrderId
+                    || (string) $config->parent_commerce_order_item_id !== $parentOrderItemId
+                    || (int) $config->commerce_unit !== $commerceUnit
+                )
+            ) {
+                throw new RuntimeException('Auto Top-Up is already bound to another Commerce purchase.', 409);
+            }
+
+            $config->parent_commerce_order_id = $parentOrderId;
+            $config->parent_commerce_order_item_id = $parentOrderItemId;
+            $config->commerce_unit = $commerceUnit;
+            $config->enabled = true;
+            $config->trigger_percent = self::TRIGGER_PERCENT;
+            $config->preferred_data_bytes = $preferredDataBytes;
+            $config->preferred_duration_days = $preferredDurationDays !== null && $preferredDurationDays > 0
+                ? $preferredDurationDays
+                : null;
+            $config->failure_reason = null;
+            $config->meta = [
+                'version' => 1,
+                'pricing_basis' => 'original_variant_regular_price',
+                'trigger_semantics' => 'first_observed_at_or_below_threshold',
+            ];
+            $config->save();
+
+            return $config;
+        });
+    }
+
+    /**
+     * Evaluate the last known provider usage. A delayed update below 20% is
+     * intentionally still eligible because the actual rule is <= 35%.
+     *
+     * @return array<string,mixed>
+     */
+    public function processUsage(Simcard|string $simcard): array
+    {
+        $simcard = is_string($simcard) ? Simcard::find($simcard) : $simcard->fresh();
+        if ($simcard === null) {
+            return ['status' => 'skipped', 'reason' => 'simcard_not_found'];
+        }
+
+        $config = SimcardAutoTopup::query()
+            ->where('simcard_id', $simcard->id)
+            ->where('enabled', true)
+            ->first();
+
+        if ($config === null) {
+            return ['status' => 'skipped', 'reason' => 'auto_topup_not_enabled'];
+        }
+
+        if (strtoupper(trim((string) $simcard->esim_status)) !== 'IN_USE') {
+            return ['status' => 'skipped', 'reason' => 'esim_not_in_use'];
+        }
+
+        $totalBytes = $this->positiveInt($simcard->total_volume);
+        $remainingBytes = $this->nonNegativeInt($simcard->remaining_volume);
+        $orderUsage = $this->nonNegativeInt($simcard->order_usage);
+
+        if ($totalBytes === null || $remainingBytes === null || $totalBytes <= 0) {
+            return ['status' => 'skipped', 'reason' => 'usage_not_ready'];
+        }
+
+        if ($config->state === self::STATE_WAITING_REARM) {
+            if (! $this->allowanceWasReplenished($config, $totalBytes, $remainingBytes, $orderUsage)) {
+                return ['status' => 'waiting_rearm'];
+            }
+
+            $config = $this->rearm($config);
+        }
+
+        if ($config->state === self::STATE_PAUSED) {
+            return ['status' => 'paused', 'reason' => $config->failure_reason];
+        }
+
+        if ($config->state === self::STATE_PROCESSING) {
+            $attempt = SimcardAutoTopupAttempt::query()
+                ->where('auto_topup_id', $config->id)
+                ->where('cycle', $config->cycle)
+                ->first();
+
+            if ($attempt !== null && in_array($attempt->status, [self::ATTEMPT_CLAIMED, self::ATTEMPT_RETRYABLE], true)) {
+                return $this->executeAttempt($config, $attempt, $simcard);
+            }
+
+            return ['status' => 'processing'];
+        }
+
+        $remainingPercent = ($remainingBytes / $totalBytes) * 100;
+        if ($remainingPercent > self::TRIGGER_PERCENT) {
+            return [
+                'status' => 'armed',
+                'remaining_percent' => round($remainingPercent, 2),
+            ];
+        }
+
+        [$config, $attempt] = $this->claimCycle((string) $config->id);
+        if ($config === null || $attempt === null) {
+            return ['status' => 'skipped', 'reason' => 'cycle_not_claimed'];
+        }
+
+        return $this->executeAttempt($config, $attempt, $simcard->fresh() ?? $simcard);
+    }
+
+    /**
+     * Retry configs using already-stored usage. This protects the flow from a
+     * transient Commerce/provider outage even when no new DATA_USAGE webhook arrives.
+     *
+     * @return array{processed:int,triggered:int,skipped:int,failed:int}
+     */
+    public function processPending(int $limit = 100): array
+    {
+        $summary = [
+            'processed' => 0,
+            'triggered' => 0,
+            'skipped' => 0,
+            'failed' => 0,
+            'notifications_processed' => 0,
+            'notifications_sent' => 0,
+            'notifications_skipped' => 0,
+            'notifications_failed' => 0,
+        ];
+
+        $configs = SimcardAutoTopup::query()
+            ->where('enabled', true)
+            ->whereIn('state', [self::STATE_ARMED, self::STATE_PROCESSING, self::STATE_WAITING_REARM])
+            ->orderBy('updated_at')
+            ->limit(max(1, min($limit, 500)))
+            ->get();
+
+        foreach ($configs as $config) {
+            $summary['processed']++;
+
+            try {
+                $result = $this->processUsage((string) $config->simcard_id);
+                if (in_array($result['status'] ?? '', ['payment_pending', 'processing'], true)) {
+                    $summary['triggered']++;
+                } else {
+                    $summary['skipped']++;
+                }
+            } catch (Throwable $exception) {
+                $summary['failed']++;
+                Log::warning('Scheduled eSIM Auto Top-Up processing failed.', [
+                    'auto_topup_id' => (string) $config->id,
+                    'simcard_id' => (string) $config->simcard_id,
+                    'exception' => basename(str_replace('\\', '/', get_class($exception))),
+                ]);
+            }
+        }
+
+        $notificationSummary = $this->retryPendingSuccessNotifications($limit);
+        $summary['notifications_processed'] = $notificationSummary['processed'];
+        $summary['notifications_sent'] = $notificationSummary['sent'];
+        $summary['notifications_skipped'] = $notificationSummary['skipped'];
+        $summary['notifications_failed'] = $notificationSummary['failed'];
+
+        return $summary;
+    }
+
+    /**
+     * Retry fulfilled Auto Top-Up confirmation emails that were not acknowledged
+     * by the Notification API. The Notification API event is itself idempotent.
+     *
+     * @return array{processed:int,sent:int,skipped:int,failed:int}
+     */
+    public function retryPendingSuccessNotifications(int $limit = 100): array
+    {
+        $summary = ['processed' => 0, 'sent' => 0, 'skipped' => 0, 'failed' => 0];
+
+        $attempts = SimcardAutoTopupAttempt::query()
+            ->where('status', self::ATTEMPT_FULFILLED)
+            ->whereNull('notification_sent_at')
+            ->where(function ($query): void {
+                $query->whereNull('notification_attempted_at')
+                    ->orWhere('notification_attempted_at', '<=', now()->subMinutes(5));
+            })
+            ->orderBy('fulfilled_at')
+            ->limit(max(1, min($limit, 500)))
+            ->get();
+
+        foreach ($attempts as $attempt) {
+            $summary['processed']++;
+
+            $result = $this->sendSuccessNotificationForAttempt((string) $attempt->id);
+            if ($result === 'sent') {
+                $summary['sent']++;
+            } elseif ($result === 'failed') {
+                $summary['failed']++;
+            } else {
+                $summary['skipped']++;
+            }
+        }
+
+        return $summary;
+    }
+
+    public function markPaymentFailed(string $topupSessionId, ?string $reason = null): void
+    {
+        $topupSessionId = $this->uuid($topupSessionId, 'Top-up session id is invalid.');
+
+        DB::transaction(function () use ($topupSessionId, $reason): void {
+            $attempt = SimcardAutoTopupAttempt::query()
+                ->where('topup_session_id', $topupSessionId)
+                ->lockForUpdate()
+                ->first();
+
+            if ($attempt === null || $attempt->status === self::ATTEMPT_FULFILLED) {
+                return;
+            }
+
+            $failureReason = trim((string) $reason) ?: 'Auto Top-Up payment failed.';
+            $attempt->status = self::ATTEMPT_FAILED;
+            $attempt->failure_reason = mb_substr($failureReason, 0, 2000);
+            $attempt->save();
+
+            $config = SimcardAutoTopup::query()->where('id', $attempt->auto_topup_id)->lockForUpdate()->first();
+            if ($config !== null) {
+                $config->state = self::STATE_PAUSED;
+                $config->failure_reason = $attempt->failure_reason;
+                $config->save();
+            }
+        });
+    }
+
+    public function markFulfilled(string $topupSessionId, ?string $commerceOrderId = null): void
+    {
+        $topupSessionId = $this->uuid($topupSessionId, 'Top-up session id is invalid.');
+
+        $attemptId = DB::transaction(function () use ($topupSessionId, $commerceOrderId): ?string {
+            $attempt = SimcardAutoTopupAttempt::query()
+                ->where('topup_session_id', $topupSessionId)
+                ->lockForUpdate()
+                ->first();
+
+            if ($attempt === null) {
+                return null;
+            }
+
+            $attempt->status = self::ATTEMPT_FULFILLED;
+            $attempt->commerce_order_id = $commerceOrderId ?: $attempt->commerce_order_id;
+            $attempt->fulfilled_at = $attempt->fulfilled_at ?: now();
+            $attempt->failure_reason = null;
+            $attempt->save();
+
+            $config = SimcardAutoTopup::query()->where('id', $attempt->auto_topup_id)->lockForUpdate()->first();
+            if ($config !== null) {
+                $config->state = self::STATE_WAITING_REARM;
+                $config->last_success_at = now();
+                $config->failure_reason = null;
+                $config->save();
+            }
+
+            return (string) $attempt->id;
+        });
+
+        if ($attemptId !== null) {
+            // The provider fulfillment is already committed. Notification failures
+            // must never roll back or change the successful top-up itself.
+            $this->sendSuccessNotificationForAttempt($attemptId);
+        }
+    }
+
+    /** @return array{0:SimcardAutoTopup|null,1:SimcardAutoTopupAttempt|null} */
+    private function claimCycle(string $configId): array
+    {
+        return DB::transaction(function () use ($configId): array {
+            $config = SimcardAutoTopup::query()->where('id', $configId)->lockForUpdate()->first();
+            if ($config === null || ! $config->enabled || $config->state !== self::STATE_ARMED) {
+                return [null, null];
+            }
+
+            $simcard = Simcard::query()->where('id', $config->simcard_id)->lockForUpdate()->first();
+            if ($simcard === null || strtoupper(trim((string) $simcard->esim_status)) !== 'IN_USE') {
+                return [null, null];
+            }
+
+            $totalBytes = $this->positiveInt($simcard->total_volume);
+            $remainingBytes = $this->nonNegativeInt($simcard->remaining_volume);
+            $orderUsage = $this->nonNegativeInt($simcard->order_usage);
+            if ($totalBytes === null || $remainingBytes === null || $totalBytes <= 0) {
+                return [null, null];
+            }
+
+            $remainingPercent = ($remainingBytes / $totalBytes) * 100;
+            if ($remainingPercent > self::TRIGGER_PERCENT) {
+                return [null, null];
+            }
+
+            $attempt = SimcardAutoTopupAttempt::query()
+                ->where('auto_topup_id', $config->id)
+                ->where('cycle', $config->cycle)
+                ->lockForUpdate()
+                ->first();
+
+            if ($attempt === null) {
+                $attempt = new SimcardAutoTopupAttempt();
+                $attempt->id = (string) Str::uuid();
+                $attempt->auto_topup_id = (string) $config->id;
+                $attempt->cycle = (int) $config->cycle;
+                $attempt->attempt_key = hash('sha256', implode('|', [
+                    'esim-auto-topup',
+                    (string) $config->id,
+                    (string) $config->cycle,
+                ]));
+                $attempt->status = self::ATTEMPT_CLAIMED;
+                $attempt->observed_total_bytes = $totalBytes;
+                $attempt->observed_remaining_bytes = $remainingBytes;
+                $attempt->observed_order_usage = $orderUsage;
+                $attempt->observed_remaining_percent = round($remainingPercent, 2);
+                $attempt->save();
+            }
+
+            $config->state = self::STATE_PROCESSING;
+            $config->last_trigger_total_bytes = $totalBytes;
+            $config->last_trigger_remaining_bytes = $remainingBytes;
+            $config->last_trigger_order_usage = $orderUsage;
+            $config->last_triggered_at = now();
+            $config->failure_reason = null;
+            $config->save();
+
+            return [$config->fresh(), $attempt->fresh()];
+        });
+    }
+
+    /** @return array<string,mixed> */
+    private function executeAttempt(SimcardAutoTopup $config, SimcardAutoTopupAttempt $attempt, Simcard $simcard): array
+    {
+        try {
+            if ($attempt->topup_session_id === null) {
+                $session = $this->topupService->prepareAutoTopupSession(
+                    simcard: $simcard,
+                    preferredDataBytes: (int) $config->preferred_data_bytes,
+                    preferredDurationDays: $config->preferred_duration_days !== null ? (int) $config->preferred_duration_days : null,
+                    attemptKey: (string) $attempt->attempt_key,
+                );
+
+                $attempt->topup_session_id = (string) $session->id;
+                $attempt->meta = array_merge((array) $attempt->meta, [
+                    'package_code' => (string) $session->package_code,
+                    'prepared_at' => now()->toIso8601String(),
+                ]);
+                $attempt->save();
+            }
+
+            $session = \App\Models\SimcardTopupSession::query()->where('id', $attempt->topup_session_id)->first();
+            if ($session === null) {
+                throw new RuntimeException('Prepared Auto Top-Up session could not be found.', 500);
+            }
+
+            $result = $this->requestCommerceCharge($config, $attempt, (string) $session->package_code);
+            $paymentState = $this->recordPaymentRequested((string) $attempt->id, $result);
+
+            return [
+                'status' => $paymentState['status'],
+                'remaining_percent' => $paymentState['attempt']->observed_remaining_percent,
+                'topup_session_id' => (string) $paymentState['attempt']->topup_session_id,
+                'commerce_order_id' => $paymentState['attempt']->commerce_order_id,
+            ];
+        } catch (ConnectionException $exception) {
+            $this->markRetryable($config, $attempt, 'Commerce connection failed.');
+
+            return ['status' => 'retryable', 'reason' => 'commerce_connection_failed'];
+        } catch (RuntimeException $exception) {
+            $code = (int) $exception->getCode();
+            if ($code >= 500 || $code === 429 || $code === 0) {
+                $this->markRetryable($config, $attempt, $exception->getMessage());
+
+                return ['status' => 'retryable', 'reason' => $exception->getMessage()];
+            }
+
+            $this->pause($config, $attempt, $exception->getMessage());
+
+            return ['status' => 'paused', 'reason' => $exception->getMessage()];
+        } catch (Throwable $exception) {
+            $this->markRetryable($config, $attempt, 'Unexpected Auto Top-Up processing error.');
+
+            Log::warning('Unexpected eSIM Auto Top-Up processing error.', [
+                'auto_topup_id' => (string) $config->id,
+                'attempt_id' => (string) $attempt->id,
+                'exception' => basename(str_replace('\\', '/', get_class($exception))),
+            ]);
+
+            return ['status' => 'retryable', 'reason' => 'unexpected_processing_error'];
+        }
+    }
+
+    /** @return array<string,mixed> */
+    private function requestCommerceCharge(SimcardAutoTopup $config, SimcardAutoTopupAttempt $attempt, string $packageCode): array
+    {
+        $url = trim((string) config('services.stellar_commerce.auto_topup_charge_url', ''));
+        if ($url === '') {
+            throw new RuntimeException('Commerce Auto Top-Up charge URL is not configured.', 500);
+        }
+
+        $username = (string) config('services.stellar_commerce.username', '');
+        $password = (string) config('services.stellar_commerce.password', '');
+        if ($username === '' || $password === '') {
+            throw new RuntimeException('Commerce Auto Top-Up credentials are not configured.', 500);
+        }
+
+        $response = Http::asJson()
+            ->withBasicAuth($username, $password)
+            ->connectTimeout(10)
+            ->timeout(45)
+            ->post($url, [
+                'parent_order_id' => (string) $config->parent_commerce_order_id,
+                'parent_order_item_id' => (string) $config->parent_commerce_order_item_id,
+                'commerce_unit' => (int) $config->commerce_unit,
+                'topup_session_id' => (string) $attempt->topup_session_id,
+                'package_code' => $packageCode,
+                'attempt_key' => (string) $attempt->attempt_key,
+            ]);
+
+        $body = $response->json();
+        $body = is_array($body) ? $body : [];
+
+        if ($response->status() === 429 || $response->serverError()) {
+            throw new RuntimeException('Commerce Auto Top-Up charge is temporarily unavailable.', $response->status());
+        }
+
+        if (! $response->successful()) {
+            $message = trim((string) ($body['response_message'] ?? $body['message'] ?? 'Auto Top-Up payment was rejected.'));
+            throw new RuntimeException($message, $response->status());
+        }
+
+        $data = is_array($body['data'] ?? null) ? $body['data'] : [];
+        if (trim((string) ($data['order_id'] ?? '')) === '') {
+            throw new RuntimeException('Commerce Auto Top-Up response is missing the order id.', 502);
+        }
+
+        return $data;
+    }
+
+    /** @param array<string,mixed> $result
+     *  @return array{status:string,attempt:SimcardAutoTopupAttempt}
+     */
+    private function recordPaymentRequested(string $attemptId, array $result): array
+    {
+        $state = DB::transaction(function () use ($attemptId, $result): array {
+            $attempt = SimcardAutoTopupAttempt::query()->where('id', $attemptId)->lockForUpdate()->firstOrFail();
+
+            $attempt->commerce_order_id = $result['order_id'] ?? $attempt->commerce_order_id;
+            $attempt->stripe_payment_intent_id = $result['payment_intent_id'] ?? $attempt->stripe_payment_intent_id;
+            $attempt->payment_requested_at = $attempt->payment_requested_at ?: now();
+            $attempt->meta = array_merge((array) $attempt->meta, array_filter([
+                'commerce_payment_intent_status' => $result['payment_intent_status'] ?? null,
+                'commerce_order_status' => $result['order_status'] ?? null,
+                'commerce_amount_cents' => isset($result['amount_cents']) ? (int) $result['amount_cents'] : null,
+                'commerce_currency' => isset($result['currency']) ? strtoupper(trim((string) $result['currency'])) : null,
+            ], static fn ($value) => $value !== null && $value !== ''));
+
+            // Stripe webhooks can beat the synchronous Commerce response. Preserve
+            // terminal state, but still persist the charge metadata needed by the
+            // confirmation email.
+            if ($attempt->status === self::ATTEMPT_FULFILLED) {
+                $attempt->save();
+                return ['status' => 'fulfilled', 'attempt' => $attempt->fresh()];
+            }
+
+            if ($attempt->status === self::ATTEMPT_FAILED) {
+                $attempt->save();
+                return ['status' => 'paused', 'attempt' => $attempt->fresh()];
+            }
+
+            $attempt->status = self::ATTEMPT_PAYMENT_PENDING;
+            $attempt->failure_reason = null;
+            $attempt->save();
+
+            return ['status' => 'payment_pending', 'attempt' => $attempt->fresh()];
+        });
+
+        if (($state['status'] ?? null) === 'fulfilled') {
+            $this->sendSuccessNotificationForAttempt((string) $state['attempt']->id, true);
+            $state['attempt'] = $state['attempt']->fresh();
+        }
+
+        return $state;
+    }
+
+    private function markRetryable(SimcardAutoTopup $config, SimcardAutoTopupAttempt $attempt, string $reason): void
+    {
+        DB::transaction(function () use ($config, $attempt, $reason): void {
+            $lockedAttempt = SimcardAutoTopupAttempt::query()->where('id', $attempt->id)->lockForUpdate()->first();
+            if ($lockedAttempt === null || in_array($lockedAttempt->status, [self::ATTEMPT_FULFILLED, self::ATTEMPT_FAILED], true)) {
+                return;
+            }
+
+            $lockedAttempt->status = self::ATTEMPT_RETRYABLE;
+            $lockedAttempt->failure_reason = mb_substr($reason, 0, 2000);
+            $lockedAttempt->save();
+
+            $lockedConfig = SimcardAutoTopup::query()->where('id', $config->id)->lockForUpdate()->first();
+            if ($lockedConfig !== null && $lockedConfig->state !== self::STATE_WAITING_REARM && $lockedConfig->state !== self::STATE_PAUSED) {
+                $lockedConfig->state = self::STATE_PROCESSING;
+                $lockedConfig->failure_reason = $lockedAttempt->failure_reason;
+                $lockedConfig->save();
+            }
+        });
+    }
+
+    private function pause(SimcardAutoTopup $config, SimcardAutoTopupAttempt $attempt, string $reason): void
+    {
+        DB::transaction(function () use ($config, $attempt, $reason): void {
+            $lockedAttempt = SimcardAutoTopupAttempt::query()->where('id', $attempt->id)->lockForUpdate()->first();
+            if ($lockedAttempt === null || $lockedAttempt->status === self::ATTEMPT_FULFILLED) {
+                return;
+            }
+
+            $lockedAttempt->status = self::ATTEMPT_FAILED;
+            $lockedAttempt->failure_reason = mb_substr($reason, 0, 2000);
+            $lockedAttempt->save();
+
+            $lockedConfig = SimcardAutoTopup::query()->where('id', $config->id)->lockForUpdate()->first();
+            if ($lockedConfig !== null && $lockedConfig->state !== self::STATE_WAITING_REARM) {
+                $lockedConfig->state = self::STATE_PAUSED;
+                $lockedConfig->failure_reason = $lockedAttempt->failure_reason;
+                $lockedConfig->save();
+            }
+        });
+    }
+
+    /**
+     * Send the customer confirmation only after provider fulfillment succeeded.
+     * Returns sent|skipped|failed and never throws into the fulfillment path.
+     */
+    private function sendSuccessNotificationForAttempt(string $attemptId, bool $force = false): string
+    {
+        $claimed = DB::transaction(function () use ($attemptId, $force): bool {
+            $attempt = SimcardAutoTopupAttempt::query()
+                ->where('id', $attemptId)
+                ->lockForUpdate()
+                ->first();
+
+            if ($attempt === null || $attempt->status !== self::ATTEMPT_FULFILLED || $attempt->notification_sent_at !== null) {
+                return false;
+            }
+
+            if (! $force && $attempt->notification_attempted_at !== null && $attempt->notification_attempted_at->gt(now()->subMinutes(2))) {
+                return false;
+            }
+
+            $attempt->notification_attempted_at = now();
+            $attempt->notification_failure_reason = null;
+            $attempt->save();
+
+            return true;
+        });
+
+        if (! $claimed) {
+            return 'skipped';
+        }
+
+        $attempt = SimcardAutoTopupAttempt::query()->where('id', $attemptId)->first();
+        if ($attempt === null) {
+            return 'skipped';
+        }
+
+        $config = SimcardAutoTopup::query()->where('id', $attempt->auto_topup_id)->first();
+        $session = $attempt->topup_session_id !== null
+            ? SimcardTopupSession::query()->where('id', $attempt->topup_session_id)->first()
+            : null;
+        $simcard = $config !== null
+            ? Simcard::query()->where('id', $config->simcard_id)->first()
+            : null;
+
+        $meta = is_array($attempt->meta) ? $attempt->meta : [];
+        $amountCents = isset($meta['commerce_amount_cents']) && is_numeric($meta['commerce_amount_cents'])
+            ? (int) $meta['commerce_amount_cents']
+            : 0;
+        $currency = strtoupper(trim((string) ($meta['commerce_currency'] ?? '')));
+
+        if ($config === null || $session === null || $simcard === null) {
+            return $this->recordNotificationFailure($attemptId, 'Auto Top-Up confirmation context is incomplete.');
+        }
+
+        if ($amountCents <= 0 || preg_match('/^[A-Z]{3}$/', $currency) !== 1) {
+            // In the webhook-race case provider fulfillment may finish before the
+            // synchronous Commerce response reaches Simcard API. recordPaymentRequested()
+            // will retry immediately after it stores the actual charge metadata.
+            return $this->recordNotificationFailure($attemptId, 'Auto Top-Up charge metadata is not available yet.');
+        }
+
+        $dataAddedBytes = (int) ($session->data_bytes ?? 0);
+        if ($dataAddedBytes <= 0) {
+            return $this->recordNotificationFailure($attemptId, 'Auto Top-Up data allowance is missing.');
+        }
+
+        $commerceOrderId = trim((string) ($attempt->commerce_order_id ?? ''));
+        if ($commerceOrderId === '' || ! Str::isUuid($commerceOrderId)) {
+            return $this->recordNotificationFailure($attemptId, 'Auto Top-Up Commerce order id is missing.');
+        }
+
+        $email = $this->resolveSimcardEmail($simcard);
+        if ($email === null) {
+            return $this->recordNotificationFailure($attemptId, 'Customer email is unavailable for Auto Top-Up confirmation.');
+        }
+
+        $idempotencyKey = 'esim_auto_topup_success_' . (string) $attempt->id;
+
+        try {
+            Notification::send(
+                NotificationEvent::make('esim_auto_topup_success')
+                    ->product('stellar-data')
+                    ->email($email)
+                    ->payload(array_filter([
+                        'simcard_id' => (string) $simcard->id,
+                        'topup_session_id' => (string) $session->id,
+                        'auto_topup_cycle' => (int) $attempt->cycle,
+                        'data_added_bytes' => $dataAddedBytes,
+                        'amount_cents' => $amountCents,
+                        'currency' => $currency,
+                        'commerce_order_id' => $commerceOrderId,
+                        'package_name' => trim((string) ($session->package_name ?? '')),
+                        'iccid_last4' => trim((string) ($simcard->iccid_last4 ?? '')),
+                        'remaining_percent_at_trigger' => $attempt->observed_remaining_percent,
+                        'manage_url' => 'https://data.stellarsecurity.com/',
+                        'support_url' => 'https://stellarsecurity.com/contact-us',
+                    ], static fn ($value) => $value !== null && $value !== ''))
+                    ->idempotencyKey($idempotencyKey)
+            );
+
+            SimcardAutoTopupAttempt::query()
+                ->where('id', $attemptId)
+                ->whereNull('notification_sent_at')
+                ->update([
+                    'notification_sent_at' => now(),
+                    'notification_failure_reason' => null,
+                ]);
+
+            Log::info('eSIM Auto Top-Up success notification sent.', [
+                'simcard_id' => (string) $simcard->id,
+                'auto_topup_attempt_id' => (string) $attempt->id,
+                'topup_session_id' => (string) $session->id,
+                'idempotency_key' => $idempotencyKey,
+            ]);
+
+            return 'sent';
+        } catch (Throwable $exception) {
+            $reason = 'Notification API delivery failed: ' . basename(str_replace('\\', '/', get_class($exception)));
+            $this->recordNotificationFailure($attemptId, $reason);
+
+            Log::warning('Failed to send eSIM Auto Top-Up success notification.', [
+                'simcard_id' => (string) $simcard->id,
+                'auto_topup_attempt_id' => (string) $attempt->id,
+                'topup_session_id' => (string) $session->id,
+                'exception' => basename(str_replace('\\', '/', get_class($exception))),
+            ]);
+
+            return 'failed';
+        }
+    }
+
+    private function recordNotificationFailure(string $attemptId, string $reason): string
+    {
+        SimcardAutoTopupAttempt::query()
+            ->where('id', $attemptId)
+            ->whereNull('notification_sent_at')
+            ->update([
+                'notification_failure_reason' => mb_substr($reason, 0, 2000),
+            ]);
+
+        return 'failed';
+    }
+
+    private function resolveSimcardEmail(Simcard $simcard): ?string
+    {
+        if (empty($simcard->email_enc)) {
+            return null;
+        }
+
+        try {
+            $email = $this->crypto->decryptEmail((string) $simcard->email_enc);
+        } catch (Throwable $exception) {
+            Log::warning('Could not decrypt eSIM email for Auto Top-Up confirmation.', [
+                'simcard_id' => (string) $simcard->id,
+                'exception' => basename(str_replace('\\', '/', get_class($exception))),
+            ]);
+
+            return null;
+        }
+
+        $email = $this->crypto->normalizeEmail($email);
+
+        return $email !== null && filter_var($email, FILTER_VALIDATE_EMAIL)
+            ? $email
+            : null;
+    }
+
+    private function allowanceWasReplenished(
+        SimcardAutoTopup $config,
+        int $totalBytes,
+        int $remainingBytes,
+        ?int $orderUsage,
+    ): bool {
+        $lastTotal = $this->nonNegativeInt($config->last_trigger_total_bytes);
+        $lastRemaining = $this->nonNegativeInt($config->last_trigger_remaining_bytes);
+        $lastUsage = $this->nonNegativeInt($config->last_trigger_order_usage);
+        $minimumIncrease = max(64 * 1024 * 1024, (int) round(((int) $config->preferred_data_bytes) * 0.20));
+
+        if ($lastTotal !== null && $totalBytes >= $lastTotal + $minimumIncrease) {
+            return true;
+        }
+
+        if ($lastRemaining !== null && $remainingBytes >= $lastRemaining + $minimumIncrease) {
+            return true;
+        }
+
+        if ($lastUsage !== null && $orderUsage !== null && $orderUsage < $lastUsage) {
+            // Some providers reset usage counters before the remaining/total allowance
+            // fields have caught up. Never re-arm from that signal alone while the
+            // stored allowance still looks below the trigger threshold, otherwise a
+            // delayed DATA_USAGE event could charge the next cycle immediately.
+            $remainingPercent = $totalBytes > 0 ? ($remainingBytes / $totalBytes) * 100 : 0;
+
+            return $remainingPercent > self::TRIGGER_PERCENT;
+        }
+
+        return false;
+    }
+
+    private function rearm(SimcardAutoTopup $config): SimcardAutoTopup
+    {
+        return DB::transaction(function () use ($config): SimcardAutoTopup {
+            $locked = SimcardAutoTopup::query()->where('id', $config->id)->lockForUpdate()->firstOrFail();
+            if ($locked->state !== self::STATE_WAITING_REARM) {
+                return $locked;
+            }
+
+            $locked->cycle = max(1, (int) $locked->cycle) + 1;
+            $locked->state = self::STATE_ARMED;
+            $locked->last_rearmed_at = now();
+            $locked->failure_reason = null;
+            $locked->save();
+
+            return $locked->fresh();
+        });
+    }
+
+    private function uuid(string $value, string $message): string
+    {
+        $value = trim($value);
+        if ($value === '' || ! Str::isUuid($value)) {
+            throw new RuntimeException($message, 422);
+        }
+
+        return $value;
+    }
+
+    private function positiveInt(mixed $value): ?int
+    {
+        return is_numeric($value) && (int) $value > 0 ? (int) $value : null;
+    }
+
+    private function nonNegativeInt(mixed $value): ?int
+    {
+        return is_numeric($value) && (int) $value >= 0 ? (int) $value : null;
+    }
+}
