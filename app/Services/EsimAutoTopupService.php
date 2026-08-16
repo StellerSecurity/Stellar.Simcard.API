@@ -222,6 +222,10 @@ class EsimAutoTopupService
             'notifications_sent' => 0,
             'notifications_skipped' => 0,
             'notifications_failed' => 0,
+            'sms_processed' => 0,
+            'sms_sent' => 0,
+            'sms_skipped' => 0,
+            'sms_failed' => 0,
         ];
 
         $configsQuery = SimcardAutoTopup::query()
@@ -304,6 +308,12 @@ class EsimAutoTopupService
         $summary['notifications_sent'] = $notificationSummary['sent'];
         $summary['notifications_skipped'] = $notificationSummary['skipped'];
         $summary['notifications_failed'] = $notificationSummary['failed'];
+
+        $smsSummary = $this->retryPendingSuccessSms($limit);
+        $summary['sms_processed'] = $smsSummary['processed'];
+        $summary['sms_sent'] = $smsSummary['sent'];
+        $summary['sms_skipped'] = $smsSummary['skipped'];
+        $summary['sms_failed'] = $smsSummary['failed'];
 
         return $summary;
     }
@@ -490,6 +500,42 @@ class EsimAutoTopupService
         return $summary;
     }
 
+    /**
+     * Retry Auto Top-Up success SMS deliveries that were already attempted but
+     * not confirmed as sent. Existing historical fulfilled attempts are not
+     * backfilled, so deploying this feature never sends retroactive SMS messages.
+     *
+     * @return array{processed:int,sent:int,skipped:int,failed:int}
+     */
+    public function retryPendingSuccessSms(int $limit = 100): array
+    {
+        $summary = ['processed' => 0, 'sent' => 0, 'skipped' => 0, 'failed' => 0];
+
+        $attempts = SimcardAutoTopupAttempt::query()
+            ->where('status', self::ATTEMPT_FULFILLED)
+            ->whereNull('sms_sent_at')
+            ->whereNotNull('sms_attempted_at')
+            ->where('sms_attempted_at', '<=', now()->subMinutes(5))
+            ->orderBy('fulfilled_at')
+            ->limit(max(1, min($limit, 500)))
+            ->get();
+
+        foreach ($attempts as $attempt) {
+            $summary['processed']++;
+
+            $result = $this->sendSuccessSmsForAttempt((string) $attempt->id);
+            if ($result === 'sent') {
+                $summary['sent']++;
+            } elseif ($result === 'failed') {
+                $summary['failed']++;
+            } else {
+                $summary['skipped']++;
+            }
+        }
+
+        return $summary;
+    }
+
     public function markPaymentFailed(string $topupSessionId, ?string $reason = null): void
     {
         $topupSessionId = $this->uuid($topupSessionId, 'Top-up session id is invalid.');
@@ -553,6 +599,7 @@ class EsimAutoTopupService
             // The provider fulfillment is already committed. Notification failures
             // must never roll back or change the successful top-up itself.
             $this->sendSuccessNotificationForAttempt($attemptId);
+            $this->sendSuccessSmsForAttempt($attemptId);
         }
     }
 
@@ -815,6 +862,7 @@ class EsimAutoTopupService
 
         if (($state['status'] ?? null) === 'fulfilled') {
             $this->sendSuccessNotificationForAttempt((string) $state['attempt']->id, true);
+            $this->sendSuccessSmsForAttempt((string) $state['attempt']->id, true);
             $state['attempt'] = $state['attempt']->fresh();
         }
 
@@ -1004,6 +1052,164 @@ class EsimAutoTopupService
             ]);
 
         return 'failed';
+    }
+
+    /**
+     * Send an Auto Top-Up completion SMS through the existing eSIMAccess SMS
+     * channel. This runs only after provider fulfillment has committed.
+     *
+     * The SMS state is deliberately independent from the email notification
+     * state. A delivery failure can never change payment or top-up state.
+     *
+     * Returns sent|skipped|failed and never throws into the fulfillment path.
+     */
+    public function sendSuccessSmsForAttempt(string $attemptId, bool $force = false): string
+    {
+        $claimed = DB::transaction(function () use ($attemptId, $force): bool {
+            $attempt = SimcardAutoTopupAttempt::query()
+                ->where('id', $attemptId)
+                ->lockForUpdate()
+                ->first();
+
+            if ($attempt === null || $attempt->status !== self::ATTEMPT_FULFILLED || $attempt->sms_sent_at !== null) {
+                return false;
+            }
+
+            if (! $force && $attempt->sms_attempted_at !== null && $attempt->sms_attempted_at->gt(now()->subMinutes(2))) {
+                return false;
+            }
+
+            $attempt->sms_attempted_at = now();
+            $attempt->sms_failure_reason = null;
+            $attempt->save();
+
+            return true;
+        });
+
+        if (! $claimed) {
+            return 'skipped';
+        }
+
+        $attempt = SimcardAutoTopupAttempt::query()->where('id', $attemptId)->first();
+        if ($attempt === null) {
+            return 'skipped';
+        }
+
+        $config = SimcardAutoTopup::query()->where('id', $attempt->auto_topup_id)->first();
+        $session = $attempt->topup_session_id !== null
+            ? SimcardTopupSession::query()->where('id', $attempt->topup_session_id)->first()
+            : null;
+        $simcard = $config !== null
+            ? Simcard::query()->where('id', $config->simcard_id)->first()
+            : null;
+
+        $meta = is_array($attempt->meta) ? $attempt->meta : [];
+        $amountCents = isset($meta['commerce_amount_cents']) && is_numeric($meta['commerce_amount_cents'])
+            ? (int) $meta['commerce_amount_cents']
+            : 0;
+        $currency = strtoupper(trim((string) ($meta['commerce_currency'] ?? '')));
+
+        if ($config === null || $session === null || $simcard === null) {
+            return $this->recordSmsFailure($attemptId, 'Auto Top-Up SMS context is incomplete.');
+        }
+
+        if ($amountCents <= 0 || preg_match('/^[A-Z]{3}$/', $currency) !== 1) {
+            return $this->recordSmsFailure($attemptId, 'Auto Top-Up charge metadata is not available yet.');
+        }
+
+        $dataAddedBytes = (int) ($session->data_bytes ?? 0);
+        if ($dataAddedBytes <= 0) {
+            return $this->recordSmsFailure($attemptId, 'Auto Top-Up data allowance is missing.');
+        }
+
+        if (empty($simcard->iccid_enc)) {
+            return $this->recordSmsFailure($attemptId, 'eSIM ICCID is unavailable for Auto Top-Up SMS.');
+        }
+
+        try {
+            $iccid = trim($this->crypto->decryptSensitiveValue((string) $simcard->iccid_enc));
+        } catch (Throwable $exception) {
+            Log::warning('Could not decrypt ICCID for Auto Top-Up success SMS.', [
+                'simcard_id' => (string) $simcard->id,
+                'auto_topup_attempt_id' => (string) $attempt->id,
+                'exception' => basename(str_replace('\\', '/', get_class($exception))),
+            ]);
+
+            return $this->recordSmsFailure($attemptId, 'Could not resolve eSIM ICCID for Auto Top-Up SMS.');
+        }
+
+        if ($iccid === '') {
+            return $this->recordSmsFailure($attemptId, 'eSIM ICCID is unavailable for Auto Top-Up SMS.');
+        }
+
+        $preferredAccount = in_array((string) $simcard->provider_account, ['primary', 'legacy'], true)
+            ? (string) $simcard->provider_account
+            : 'legacy';
+
+        try {
+            $account = $this->provider->resolveAccountForEsim(null, $iccid, $preferredAccount);
+            $dataAdded = $this->formatDataAmount($dataAddedBytes);
+            $message = sprintf(
+                'Your Stellar eSIM has been topped up with %s. You\'re all set. Auto Top-Up will take care of it again when your data runs low.',
+                $dataAdded,
+            );
+
+            $this->provider->sendSms($iccid, $message, $account);
+
+            SimcardAutoTopupAttempt::query()
+                ->where('id', $attemptId)
+                ->whereNull('sms_sent_at')
+                ->update([
+                    'sms_sent_at' => now(),
+                    'sms_failure_reason' => null,
+                ]);
+
+            Log::info('eSIM Auto Top-Up success SMS sent.', [
+                'simcard_id' => (string) $simcard->id,
+                'auto_topup_attempt_id' => (string) $attempt->id,
+                'topup_session_id' => (string) $session->id,
+                'provider_account' => $account,
+            ]);
+
+            return 'sent';
+        } catch (Throwable $exception) {
+            $reason = 'Provider SMS delivery failed: ' . basename(str_replace('\\', '/', get_class($exception)));
+            $this->recordSmsFailure($attemptId, $reason);
+
+            Log::warning('Failed to send eSIM Auto Top-Up success SMS.', [
+                'simcard_id' => (string) $simcard->id,
+                'auto_topup_attempt_id' => (string) $attempt->id,
+                'topup_session_id' => (string) $session->id,
+                'exception' => basename(str_replace('\\', '/', get_class($exception))),
+            ]);
+
+            return 'failed';
+        }
+    }
+
+    private function recordSmsFailure(string $attemptId, string $reason): string
+    {
+        SimcardAutoTopupAttempt::query()
+            ->where('id', $attemptId)
+            ->whereNull('sms_sent_at')
+            ->update([
+                'sms_failure_reason' => mb_substr($reason, 0, 2000),
+            ]);
+
+        return 'failed';
+    }
+
+    private function formatDataAmount(int $bytes): string
+    {
+        if ($bytes >= 1024 * 1024 * 1024) {
+            $value = $bytes / 1024 / 1024 / 1024;
+
+            return rtrim(rtrim(number_format($value, 2, '.', ''), '0'), '.') . ' GB';
+        }
+
+        $value = $bytes / 1024 / 1024;
+
+        return rtrim(rtrim(number_format($value, 2, '.', ''), '0'), '.') . ' MB';
     }
 
     private function resolveSimcardEmail(Simcard $simcard): ?string

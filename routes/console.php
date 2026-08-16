@@ -38,7 +38,7 @@ Artisan::command('esim:process-auto-topups {--limit=100} {--simcard=} {--refresh
         );
 
     $this->info(sprintf(
-        'Processed: %d, triggered: %d, skipped: %d, failed: %d; provider usage attempted: %d, refreshed: %d, skipped: %d, failed: %d; notifications processed: %d, sent: %d, skipped: %d, failed: %d',
+        'Processed: %d, triggered: %d, skipped: %d, failed: %d; provider usage attempted: %d, refreshed: %d, skipped: %d, failed: %d; notifications processed: %d, sent: %d, skipped: %d, failed: %d; SMS processed: %d, sent: %d, skipped: %d, failed: %d',
         $summary['processed'],
         $summary['triggered'],
         $summary['skipped'],
@@ -51,10 +51,23 @@ Artisan::command('esim:process-auto-topups {--limit=100} {--simcard=} {--refresh
         $summary['notifications_sent'],
         $summary['notifications_skipped'],
         $summary['notifications_failed'],
+        $summary['sms_processed'],
+        $summary['sms_sent'],
+        $summary['sms_skipped'],
+        $summary['sms_failed'],
     ));
 
     return $summary['failed'] > 0 ? 1 : 0;
 })->purpose('Process eligible and retryable eSIM Auto Top-Up cycles');
+
+Artisan::command('esim:send-auto-topup-sms {attempt}', function () {
+    $result = app(EsimAutoTopupService::class)
+        ->sendSuccessSmsForAttempt((string) $this->argument('attempt'), true);
+
+    $this->info('SMS result: ' . $result);
+
+    return $result === 'failed' ? 1 : 0;
+})->purpose('Send or retry the Auto Top-Up success SMS for one fulfilled attempt');
 
 Schedule::command('esim:process-auto-topups')
     ->everyFiveMinutes()

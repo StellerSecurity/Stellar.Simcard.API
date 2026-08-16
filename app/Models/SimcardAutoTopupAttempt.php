@@ -29,6 +29,9 @@ class SimcardAutoTopupAttempt extends Model
         'notification_attempted_at',
         'notification_sent_at',
         'notification_failure_reason',
+        'sms_attempted_at',
+        'sms_sent_at',
+        'sms_failure_reason',
     ];
 
     protected $casts = [
@@ -42,5 +45,7 @@ class SimcardAutoTopupAttempt extends Model
         'fulfilled_at' => 'datetime',
         'notification_attempted_at' => 'datetime',
         'notification_sent_at' => 'datetime',
+        'sms_attempted_at' => 'datetime',
+        'sms_sent_at' => 'datetime',
     ];
 }
