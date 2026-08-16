@@ -7,6 +7,7 @@ use App\Models\SimcardAutoTopup;
 use App\Models\SimcardAutoTopupAttempt;
 use App\Models\SimcardTopupSession;
 use App\Services\Esim\EsimCryptoService;
+use App\Services\Esim\EsimProvider;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -26,14 +27,18 @@ class EsimAutoTopupService
     private const STATE_PAUSED = 'PAUSED';
 
     private const ATTEMPT_CLAIMED = 'CLAIMED';
+    private const ATTEMPT_EXECUTING = 'EXECUTING';
     private const ATTEMPT_RETRYABLE = 'RETRYABLE';
     private const ATTEMPT_PAYMENT_PENDING = 'PAYMENT_PENDING';
     private const ATTEMPT_FULFILLED = 'FULFILLED';
     private const ATTEMPT_FAILED = 'FAILED';
 
+    private const EXECUTION_LEASE_SECONDS = 120;
+
     public function __construct(
         private readonly TopupService $topupService,
         private readonly EsimCryptoService $crypto,
+        private readonly EsimProvider $provider,
     ) {}
 
     /**
@@ -169,7 +174,7 @@ class EsimAutoTopupService
                 ->where('cycle', $config->cycle)
                 ->first();
 
-            if ($attempt !== null && in_array($attempt->status, [self::ATTEMPT_CLAIMED, self::ATTEMPT_RETRYABLE], true)) {
+            if ($attempt !== null && in_array($attempt->status, [self::ATTEMPT_CLAIMED, self::ATTEMPT_EXECUTING, self::ATTEMPT_RETRYABLE], true)) {
                 return $this->executeAttempt($config, $attempt, $simcard);
             }
 
@@ -193,27 +198,42 @@ class EsimAutoTopupService
     }
 
     /**
-     * Retry configs using already-stored usage. This protects the flow from a
-     * transient Commerce/provider outage even when no new DATA_USAGE webhook arrives.
+     * Process Auto Top-Up configs. ARMED and WAITING_REARM configs refresh usage
+     * directly from the provider before eligibility is evaluated. PROCESSING
+     * configs keep retrying the already-claimed cycle without creating a new one.
      *
-     * @return array{processed:int,triggered:int,skipped:int,failed:int}
+     * A provider refresh failure is fail-closed for new cycles: stale stored usage
+     * is never allowed to start a fresh automatic card charge.
+     *
+     * @return array<string,int>
      */
-    public function processPending(int $limit = 100): array
+    public function processPending(int $limit = 100, ?string $onlySimcardId = null, bool $refreshOnly = false): array
     {
         $summary = [
             'processed' => 0,
             'triggered' => 0,
             'skipped' => 0,
             'failed' => 0,
+            'usage_refresh_attempted' => 0,
+            'usage_refreshed' => 0,
+            'usage_refresh_skipped' => 0,
+            'usage_refresh_failed' => 0,
             'notifications_processed' => 0,
             'notifications_sent' => 0,
             'notifications_skipped' => 0,
             'notifications_failed' => 0,
         ];
 
-        $configs = SimcardAutoTopup::query()
+        $configsQuery = SimcardAutoTopup::query()
             ->where('enabled', true)
-            ->whereIn('state', [self::STATE_ARMED, self::STATE_PROCESSING, self::STATE_WAITING_REARM])
+            ->whereIn('state', [self::STATE_ARMED, self::STATE_PROCESSING, self::STATE_WAITING_REARM]);
+
+        $onlySimcardId = trim((string) $onlySimcardId);
+        if ($onlySimcardId !== '') {
+            $configsQuery->where('simcard_id', $onlySimcardId);
+        }
+
+        $configs = $configsQuery
             ->orderBy('updated_at')
             ->limit(max(1, min($limit, 500)))
             ->get();
@@ -222,8 +242,49 @@ class EsimAutoTopupService
             $summary['processed']++;
 
             try {
+                if ($refreshOnly && $config->state === self::STATE_PROCESSING) {
+                    $summary['skipped']++;
+                    continue;
+                }
+
+                if (in_array($config->state, [self::STATE_ARMED, self::STATE_WAITING_REARM], true)) {
+                    $simcard = Simcard::query()->where('id', $config->simcard_id)->first();
+
+                    if ($simcard === null) {
+                        $summary['skipped']++;
+                        continue;
+                    }
+
+                    if (strtoupper(trim((string) $simcard->esim_status)) !== 'IN_USE') {
+                        $summary['skipped']++;
+                        continue;
+                    }
+
+                    $summary['usage_refresh_attempted']++;
+                    $refresh = $this->refreshUsageFromProvider($simcard);
+
+                    if (($refresh['status'] ?? '') === 'refreshed') {
+                        $summary['usage_refreshed']++;
+
+                        if ($refreshOnly) {
+                            $summary['skipped']++;
+                            continue;
+                        }
+                    } elseif (($refresh['status'] ?? '') === 'failed') {
+                        // Never open a new charge cycle from stale usage when the
+                        // provider cannot confirm the current allowance.
+                        $summary['usage_refresh_failed']++;
+                        $summary['skipped']++;
+                        continue;
+                    } else {
+                        $summary['usage_refresh_skipped']++;
+                        $summary['skipped']++;
+                        continue;
+                    }
+                }
+
                 $result = $this->processUsage((string) $config->simcard_id);
-                if (in_array($result['status'] ?? '', ['payment_pending', 'processing'], true)) {
+                if (in_array($result['status'] ?? '', ['payment_pending', 'processing', 'fulfilled', 'retryable'], true)) {
                     $summary['triggered']++;
                 } else {
                     $summary['skipped']++;
@@ -245,6 +306,151 @@ class EsimAutoTopupService
         $summary['notifications_failed'] = $notificationSummary['failed'];
 
         return $summary;
+    }
+
+    /**
+     * Refresh the latest eSIM allowance directly from the provider. This is the
+     * reliable fallback when DATA_USAGE webhooks are delayed or not emitted.
+     *
+     * This method is read-only at the provider. It only updates our local SIM
+     * snapshot after a successful response.
+     *
+     * @return array<string,mixed>
+     */
+    private function refreshUsageFromProvider(Simcard $simcard): array
+    {
+        if (strtoupper(trim((string) $simcard->esim_status)) !== 'IN_USE') {
+            return ['status' => 'skipped', 'reason' => 'esim_not_in_use'];
+        }
+
+        if (empty($simcard->iccid_enc)) {
+            return ['status' => 'skipped', 'reason' => 'iccid_not_ready'];
+        }
+
+        try {
+            $iccid = trim($this->crypto->decryptSensitiveValue((string) $simcard->iccid_enc));
+            if ($iccid === '') {
+                return ['status' => 'skipped', 'reason' => 'iccid_not_ready'];
+            }
+
+            $preferredAccount = in_array((string) $simcard->provider_account, ['primary', 'legacy'], true)
+                ? (string) $simcard->provider_account
+                : 'legacy';
+
+            $account = $this->provider->resolveAccountForEsim(null, $iccid, $preferredAccount);
+            $response = $this->provider->queryEsim(null, $iccid, $account);
+            $providerSim = data_get($response, 'obj.esimList.0')
+                ?? data_get($response, 'data.obj.esimList.0')
+                ?? data_get($response, 'data.esimList.0')
+                ?? data_get($response, 'esimList.0');
+
+            if (! is_array($providerSim)) {
+                return ['status' => 'skipped', 'reason' => 'provider_usage_not_ready'];
+            }
+
+            $returnedIccid = trim((string) ($providerSim['iccid'] ?? ''));
+            if ($returnedIccid !== '' && ! hash_equals($iccid, $returnedIccid)) {
+                Log::warning('eSIM Auto Top-Up provider usage response ICCID mismatch.', [
+                    'simcard_id' => (string) $simcard->id,
+                    'provider_account' => $account,
+                ]);
+
+                return ['status' => 'failed', 'reason' => 'provider_iccid_mismatch'];
+            }
+
+            $providerStatus = strtoupper(trim((string) ($providerSim['esimStatus'] ?? '')));
+            $smdpStatus = trim((string) ($providerSim['smdpStatus'] ?? ''));
+            $totalBytes = $this->positiveInt($providerSim['totalVolume'] ?? null);
+            $orderUsage = $this->nonNegativeInt($providerSim['orderUsage'] ?? null);
+            $remainingBytes = $this->nonNegativeInt($providerSim['remain'] ?? null);
+
+            if ($remainingBytes === null && $totalBytes !== null && $orderUsage !== null) {
+                $remainingBytes = max(0, $totalBytes - $orderUsage);
+            }
+
+            $hadUsageBefore = $this->positiveInt($simcard->total_volume) !== null
+                && $this->nonNegativeInt($simcard->remaining_volume) !== null;
+
+            DB::transaction(function () use (
+                $simcard,
+                $account,
+                $providerStatus,
+                $smdpStatus,
+                $totalBytes,
+                $orderUsage,
+                $remainingBytes,
+            ): void {
+                $locked = Simcard::query()->where('id', $simcard->id)->lockForUpdate()->first();
+                if ($locked === null) {
+                    return;
+                }
+
+                $locked->provider_account = $account;
+
+                if ($providerStatus !== '') {
+                    $locked->esim_status = $providerStatus;
+                    if ($providerStatus === 'IN_USE') {
+                        $locked->state = 'active';
+                        $locked->activated_at = $locked->activated_at ?? now();
+                    }
+                }
+
+                if ($smdpStatus !== '') {
+                    $locked->smdp_status = $smdpStatus;
+                }
+
+                if ($totalBytes !== null) {
+                    $locked->total_volume = $totalBytes;
+                }
+
+                if ($orderUsage !== null) {
+                    $locked->order_usage = $orderUsage;
+                }
+
+                if ($remainingBytes !== null) {
+                    $locked->remaining_volume = $remainingBytes;
+                }
+
+                $locked->save();
+            });
+
+            if ($totalBytes === null || $remainingBytes === null || $totalBytes <= 0) {
+                return [
+                    'status' => 'skipped',
+                    'reason' => 'provider_usage_not_ready',
+                    'esim_status' => $providerStatus !== '' ? $providerStatus : null,
+                ];
+            }
+
+            $remainingPercent = ($remainingBytes / $totalBytes) * 100;
+
+            if (! $hadUsageBefore || $remainingPercent <= self::TRIGGER_PERCENT) {
+                Log::info('eSIM Auto Top-Up provider usage refreshed.', [
+                    'simcard_id' => (string) $simcard->id,
+                    'provider_account' => $account,
+                    'esim_status' => $providerStatus !== '' ? $providerStatus : (string) $simcard->esim_status,
+                    'remaining_percent' => round($remainingPercent, 2),
+                    'eligible' => ($providerStatus === '' || $providerStatus === 'IN_USE')
+                        && $remainingPercent <= self::TRIGGER_PERCENT,
+                ]);
+            }
+
+            return [
+                'status' => 'refreshed',
+                'esim_status' => $providerStatus !== '' ? $providerStatus : (string) $simcard->esim_status,
+                'total_bytes' => $totalBytes,
+                'order_usage' => $orderUsage,
+                'remaining_bytes' => $remainingBytes,
+                'remaining_percent' => round($remainingPercent, 2),
+            ];
+        } catch (Throwable $exception) {
+            Log::warning('eSIM Auto Top-Up provider usage refresh failed.', [
+                'simcard_id' => (string) $simcard->id,
+                'exception' => basename(str_replace('\\', '/', get_class($exception))),
+            ]);
+
+            return ['status' => 'failed', 'reason' => 'provider_usage_refresh_failed'];
+        }
     }
 
     /**
@@ -415,6 +621,13 @@ class EsimAutoTopupService
     /** @return array<string,mixed> */
     private function executeAttempt(SimcardAutoTopup $config, SimcardAutoTopupAttempt $attempt, Simcard $simcard): array
     {
+        $claimedAttempt = $this->claimAttemptExecution((string) $attempt->id);
+        if ($claimedAttempt === null) {
+            return ['status' => 'processing'];
+        }
+
+        $attempt = $claimedAttempt;
+
         try {
             if ($attempt->topup_session_id === null) {
                 $session = $this->topupService->prepareAutoTopupSession(
@@ -472,6 +685,47 @@ class EsimAutoTopupService
 
             return ['status' => 'retryable', 'reason' => 'unexpected_processing_error'];
         }
+    }
+
+    /**
+     * Acquire a short database-backed execution lease for one Auto Top-Up attempt.
+     * Concurrent webhook and polling workers therefore do not both call Commerce.
+     * If a worker dies mid-flight, the same attempt can be reclaimed after the
+     * lease expires; Commerce and Stripe still receive the same idempotency key.
+     */
+    private function claimAttemptExecution(string $attemptId): ?SimcardAutoTopupAttempt
+    {
+        return DB::transaction(function () use ($attemptId): ?SimcardAutoTopupAttempt {
+            $attempt = SimcardAutoTopupAttempt::query()
+                ->where('id', $attemptId)
+                ->lockForUpdate()
+                ->first();
+
+            if ($attempt === null) {
+                return null;
+            }
+
+            if (in_array($attempt->status, [self::ATTEMPT_PAYMENT_PENDING, self::ATTEMPT_FULFILLED, self::ATTEMPT_FAILED], true)) {
+                return null;
+            }
+
+            if ($attempt->status === self::ATTEMPT_EXECUTING) {
+                $updatedAt = $attempt->updated_at;
+                if ($updatedAt !== null && $updatedAt->gt(now()->subSeconds(self::EXECUTION_LEASE_SECONDS))) {
+                    return null;
+                }
+            } elseif (! in_array($attempt->status, [self::ATTEMPT_CLAIMED, self::ATTEMPT_RETRYABLE], true)) {
+                return null;
+            }
+
+            $attempt->status = self::ATTEMPT_EXECUTING;
+            $attempt->meta = array_merge((array) $attempt->meta, [
+                'execution_claimed_at' => now()->toIso8601String(),
+            ]);
+            $attempt->save();
+
+            return $attempt->fresh();
+        });
     }
 
     /** @return array<string,mixed> */
