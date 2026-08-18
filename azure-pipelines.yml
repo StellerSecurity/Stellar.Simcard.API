@@ -46,7 +46,6 @@ stages:
       workingDirectory: $(rootFolder)
       displayName: 'Composer install'
 
-
     - task: ArchiveFiles@2
       displayName: 'Archive files'
       inputs:

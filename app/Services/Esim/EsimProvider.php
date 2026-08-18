@@ -20,6 +20,9 @@ interface EsimProvider
 
     public function sendSms(string $iccid, string $message, string $account = 'primary'): array;
 
+    /** Cancel an unused, uninstalled profile and request the provider refund. */
+    public function cancelEsim(string $esimTranNo, string $account = 'primary'): array;
+
     /**
      * Apply a paid top-up exactly once against the already-resolved account.
      * Callers must never blindly retry this method with another account.

@@ -45,14 +45,6 @@ return [
             'STELLAR_COMMERCE_AUTO_TOPUP_CHARGE_URL',
             'https://stellarcommerceapiprod.azurewebsites.net/api/v1/esimautotopupcontroller/charge'
         ),
-        'auto_topup_authorization_status_url' => env(
-            'STELLAR_COMMERCE_AUTO_TOPUP_AUTHORIZATION_STATUS_URL',
-            'https://stellarcommerceapiprod.azurewebsites.net/api/v1/esimautotopupcontroller/authorization/status'
-        ),
-        'auto_topup_authorization_url' => env(
-            'STELLAR_COMMERCE_AUTO_TOPUP_AUTHORIZATION_URL',
-            'https://stellarcommerceapiprod.azurewebsites.net/api/v1/esimautotopupcontroller/authorization'
-        ),
         'username' => env('APPSETTING_API_USERNAME_STELLAR_COMMERCE_API'),
         'password' => env('APPSETTING_API_PASSWORD_STELLAR_COMMERCE_API'),
     ],
