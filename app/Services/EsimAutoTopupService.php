@@ -20,7 +20,7 @@ use Throwable;
 
 class EsimAutoTopupService
 {
-    private const TRIGGER_PERCENT = 40; //
+    private const TRIGGER_PERCENT = 50; //
     private const STATE_ARMED = 'ARMED';
     private const STATE_PROCESSING = 'PROCESSING';
     private const STATE_WAITING_REARM = 'WAITING_REARM';
