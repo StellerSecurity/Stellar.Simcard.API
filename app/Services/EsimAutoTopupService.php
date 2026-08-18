@@ -25,6 +25,7 @@ class EsimAutoTopupService
     private const STATE_PROCESSING = 'PROCESSING';
     private const STATE_WAITING_REARM = 'WAITING_REARM';
     private const STATE_PAUSED = 'PAUSED';
+    private const STATE_DISABLED = 'DISABLED';
 
     private const ATTEMPT_CLAIMED = 'CLAIMED';
     private const ATTEMPT_EXECUTING = 'EXECUTING';
@@ -77,8 +78,27 @@ class EsimAutoTopupService
             $preferredDataBytes,
             $preferredDurationDays,
         ): SimcardAutoTopup {
+            // Lock the owning SIM row first so provisioning retries and Data-app
+            // enable/disable requests cannot race while the config row is absent.
+            $lockedSimcard = Simcard::query()
+                ->where('id', $simcard->id)
+                ->lockForUpdate()
+                ->first();
+
+            if ($lockedSimcard === null) {
+                throw new RuntimeException('Provisioned eSIM could not be found.', 404);
+            }
+
+            if (
+                (string) $lockedSimcard->commerce_order_id !== $parentOrderId
+                || (string) $lockedSimcard->commerce_order_item_id !== $parentOrderItemId
+                || (int) $lockedSimcard->commerce_unit !== $commerceUnit
+            ) {
+                throw new RuntimeException('Auto Top-Up Commerce ownership does not match the provisioned eSIM.', 409);
+            }
+
             $config = SimcardAutoTopup::query()
-                ->where('simcard_id', $simcard->id)
+                ->where('simcard_id', $lockedSimcard->id)
                 ->lockForUpdate()
                 ->first();
 
@@ -101,21 +121,37 @@ class EsimAutoTopupService
                 throw new RuntimeException('Auto Top-Up is already bound to another Commerce purchase.', 409);
             }
 
+            $meta = is_array($config->meta) ? $config->meta : [];
+            $disabledByCustomer = ! empty($meta['disabled_by_customer_at'])
+                || ! empty($meta['authorization_revoked_at']);
+
             $config->parent_commerce_order_id = $parentOrderId;
             $config->parent_commerce_order_item_id = $parentOrderItemId;
             $config->commerce_unit = $commerceUnit;
-            $config->enabled = true;
             $config->trigger_percent = self::TRIGGER_PERCENT;
             $config->preferred_data_bytes = $preferredDataBytes;
             $config->preferred_duration_days = $preferredDurationDays !== null && $preferredDurationDays > 0
                 ? $preferredDurationDays
                 : null;
-            $config->failure_reason = null;
-            $config->meta = [
-                'version' => 1,
+
+            // Provisioning retries must never silently undo a later customer
+            // decision from the Data app. A PROCESSING cycle remains resolvable,
+            // while every other disabled configuration stays fail-closed.
+            if ($disabledByCustomer) {
+                $config->enabled = false;
+                if ($config->state !== self::STATE_PROCESSING) {
+                    $config->state = self::STATE_DISABLED;
+                }
+            } else {
+                $config->enabled = true;
+                $config->failure_reason = null;
+            }
+
+            $config->meta = array_merge($meta, [
+                'version' => 2,
                 'pricing_basis' => 'original_variant_regular_price',
                 'trigger_semantics' => 'first_observed_at_or_below_threshold',
-            ];
+            ]);
             $config->save();
 
             return $config;
@@ -137,38 +173,26 @@ class EsimAutoTopupService
 
         $config = SimcardAutoTopup::query()
             ->where('simcard_id', $simcard->id)
-            ->where('enabled', true)
             ->first();
 
         if ($config === null) {
-            return ['status' => 'skipped', 'reason' => 'auto_topup_not_enabled'];
+            return ['status' => 'skipped', 'reason' => 'auto_topup_not_configured'];
+        }
+
+        $state = strtoupper(trim((string) $config->state));
+        if (! $config->enabled && $state !== self::STATE_PROCESSING) {
+            return ['status' => 'disabled'];
         }
 
         if (strtoupper(trim((string) $simcard->esim_status)) !== 'IN_USE') {
             return ['status' => 'skipped', 'reason' => 'esim_not_in_use'];
         }
 
-        $totalBytes = $this->positiveInt($simcard->total_volume);
-        $remainingBytes = $this->nonNegativeInt($simcard->remaining_volume);
-        $orderUsage = $this->nonNegativeInt($simcard->order_usage);
-
-        if ($totalBytes === null || $remainingBytes === null || $totalBytes <= 0) {
-            return ['status' => 'skipped', 'reason' => 'usage_not_ready'];
-        }
-
-        if ($config->state === self::STATE_WAITING_REARM) {
-            if (! $this->allowanceWasReplenished($config, $totalBytes, $remainingBytes, $orderUsage)) {
-                return ['status' => 'waiting_rearm'];
-            }
-
-            $config = $this->rearm($config);
-        }
-
-        if ($config->state === self::STATE_PAUSED) {
-            return ['status' => 'paused', 'reason' => $config->failure_reason];
-        }
-
-        if ($config->state === self::STATE_PROCESSING) {
+        // A customer can turn Auto Top-Up off while an already claimed cycle is
+        // crossing the payment boundary. Never claim a new cycle, but continue
+        // the exact same idempotent attempt so a successful charge cannot be left
+        // without provider fulfillment.
+        if ($state === self::STATE_PROCESSING) {
             $attempt = SimcardAutoTopupAttempt::query()
                 ->where('auto_topup_id', $config->id)
                 ->where('cycle', $config->cycle)
@@ -179,6 +203,34 @@ class EsimAutoTopupService
             }
 
             return ['status' => 'processing'];
+        }
+
+        if (! $config->enabled) {
+            return ['status' => 'disabled'];
+        }
+
+        $totalBytes = $this->positiveInt($simcard->total_volume);
+        $remainingBytes = $this->nonNegativeInt($simcard->remaining_volume);
+        $orderUsage = $this->nonNegativeInt($simcard->order_usage);
+
+        if ($totalBytes === null || $remainingBytes === null || $totalBytes <= 0) {
+            return ['status' => 'skipped', 'reason' => 'usage_not_ready'];
+        }
+
+        if ($state === self::STATE_WAITING_REARM) {
+            if (! $this->allowanceWasReplenished($config, $totalBytes, $remainingBytes, $orderUsage)) {
+                return ['status' => 'waiting_rearm'];
+            }
+
+            $config = $this->rearm($config);
+            if (! $config->enabled || $config->state === self::STATE_DISABLED) {
+                return ['status' => 'disabled'];
+            }
+            $state = strtoupper(trim((string) $config->state));
+        }
+
+        if ($state === self::STATE_PAUSED) {
+            return ['status' => 'paused', 'reason' => $config->failure_reason];
         }
 
         $remainingPercent = ($remainingBytes / $totalBytes) * 100;
@@ -229,8 +281,22 @@ class EsimAutoTopupService
         ];
 
         $configsQuery = SimcardAutoTopup::query()
-            ->where('enabled', true)
-            ->whereIn('state', [self::STATE_ARMED, self::STATE_PROCESSING, self::STATE_WAITING_REARM]);
+            ->where(function ($query): void {
+                $query
+                    ->where(function ($enabledQuery): void {
+                        $enabledQuery
+                            ->where('enabled', true)
+                            ->whereIn('state', [self::STATE_ARMED, self::STATE_PROCESSING, self::STATE_WAITING_REARM]);
+                    })
+                    ->orWhere(function ($disabledQuery): void {
+                        // A customer-disabled config may still have one already
+                        // claimed cycle that must resolve with the same idempotency
+                        // key. It can never claim a new cycle while disabled.
+                        $disabledQuery
+                            ->where('enabled', false)
+                            ->where('state', self::STATE_PROCESSING);
+                    });
+            });
 
         $onlySimcardId = trim((string) $onlySimcardId);
         if ($onlySimcardId !== '') {
@@ -557,7 +623,14 @@ class EsimAutoTopupService
 
             $config = SimcardAutoTopup::query()->where('id', $attempt->auto_topup_id)->lockForUpdate()->first();
             if ($config !== null) {
-                $config->state = self::STATE_PAUSED;
+                $meta = is_array($config->meta) ? $config->meta : [];
+                if ($config->enabled) {
+                    $config->state = self::STATE_PAUSED;
+                } else {
+                    $meta['state_before_disable'] = self::STATE_PAUSED;
+                    $config->state = self::STATE_DISABLED;
+                    $config->meta = $meta;
+                }
                 $config->failure_reason = $attempt->failure_reason;
                 $config->save();
             }
@@ -586,7 +659,17 @@ class EsimAutoTopupService
 
             $config = SimcardAutoTopup::query()->where('id', $attempt->auto_topup_id)->lockForUpdate()->first();
             if ($config !== null) {
-                $config->state = self::STATE_WAITING_REARM;
+                $meta = is_array($config->meta) ? $config->meta : [];
+                if ($config->enabled) {
+                    $config->state = self::STATE_WAITING_REARM;
+                } else {
+                    // The top-up already crossed the payment boundary before the
+                    // customer switched it off. Finish delivery, then remain off.
+                    // Re-enabling later must first observe the replenished allowance.
+                    $meta['state_before_disable'] = self::STATE_WAITING_REARM;
+                    $config->state = self::STATE_DISABLED;
+                    $config->meta = $meta;
+                }
                 $config->last_success_at = now();
                 $config->failure_reason = null;
                 $config->save();
@@ -606,14 +689,28 @@ class EsimAutoTopupService
     /** @return array{0:SimcardAutoTopup|null,1:SimcardAutoTopupAttempt|null} */
     private function claimCycle(string $configId): array
     {
-        return DB::transaction(function () use ($configId): array {
-            $config = SimcardAutoTopup::query()->where('id', $configId)->lockForUpdate()->first();
-            if ($config === null || ! $config->enabled || $config->state !== self::STATE_ARMED) {
+        $configSnapshot = SimcardAutoTopup::query()->where('id', $configId)->first();
+        if ($configSnapshot === null) {
+            return [null, null];
+        }
+
+        $simcardId = (string) $configSnapshot->simcard_id;
+
+        return DB::transaction(function () use ($configId, $simcardId): array {
+            // Use the same SIM -> config lock order as management/provisioning.
+            // The final config checks below remain authoritative.
+            $simcard = Simcard::query()->where('id', $simcardId)->lockForUpdate()->first();
+            if ($simcard === null || strtoupper(trim((string) $simcard->esim_status)) !== 'IN_USE') {
                 return [null, null];
             }
 
-            $simcard = Simcard::query()->where('id', $config->simcard_id)->lockForUpdate()->first();
-            if ($simcard === null || strtoupper(trim((string) $simcard->esim_status)) !== 'IN_USE') {
+            $config = SimcardAutoTopup::query()->where('id', $configId)->lockForUpdate()->first();
+            if (
+                $config === null
+                || (string) $config->simcard_id !== (string) $simcard->id
+                || ! $config->enabled
+                || $config->state !== self::STATE_ARMED
+            ) {
                 return [null, null];
             }
 
@@ -692,9 +789,23 @@ class EsimAutoTopupService
                 $attempt->save();
             }
 
-            $session = \App\Models\SimcardTopupSession::query()->where('id', $attempt->topup_session_id)->first();
+            $session = SimcardTopupSession::query()->where('id', $attempt->topup_session_id)->first();
             if ($session === null) {
                 throw new RuntimeException('Prepared Auto Top-Up session could not be found.', 500);
+            }
+
+            // This is the atomic customer-disable boundary. If OFF won before a
+            // Commerce request started, cancel this cycle without charging. If a
+            // request had already started (including a lost-response retry), keep
+            // resolving the same idempotent attempt so payment cannot be separated
+            // from provider fulfillment.
+            if (! $this->beginCommerceRequest((string) $config->id, (string) $attempt->id)) {
+                return [
+                    'status' => 'disabled',
+                    'remaining_percent' => $attempt->observed_remaining_percent,
+                    'topup_session_id' => (string) $attempt->topup_session_id,
+                    'commerce_order_id' => null,
+                ];
             }
 
             $result = $this->requestCommerceCharge($config, $attempt, (string) $session->package_code);
@@ -775,6 +886,77 @@ class EsimAutoTopupService
         });
     }
 
+    private function beginCommerceRequest(string $configId, string $attemptId): bool
+    {
+        return DB::transaction(function () use ($configId, $attemptId): bool {
+            // Payment/fulfillment callbacks use attempt -> config, so keep the
+            // same lock order here to avoid an inversion during lost-response retries.
+            $attempt = SimcardAutoTopupAttempt::query()
+                ->where('id', $attemptId)
+                ->lockForUpdate()
+                ->first();
+            $config = SimcardAutoTopup::query()
+                ->where('id', $configId)
+                ->lockForUpdate()
+                ->first();
+
+            if ($config === null || $attempt === null || (string) $attempt->auto_topup_id !== (string) $config->id) {
+                throw new RuntimeException('Auto Top-Up execution state could not be found.', 500);
+            }
+
+            $meta = is_array($attempt->meta) ? $attempt->meta : [];
+            $paymentBoundaryStarted = ! empty($meta['commerce_request_started_at'])
+                || $attempt->payment_requested_at !== null
+                || trim((string) $attempt->commerce_order_id) !== ''
+                || trim((string) $attempt->stripe_payment_intent_id) !== '';
+
+            if (! $config->enabled && ! $paymentBoundaryStarted) {
+                $now = now();
+                $attempt->status = self::ATTEMPT_FAILED;
+                $attempt->failure_reason = 'Auto Top-Up was disabled before payment started.';
+                $attempt->meta = array_merge($meta, [
+                    'cancelled_by_customer_at' => $now->toIso8601String(),
+                    'cancelled_before_payment' => true,
+                ]);
+                $attempt->save();
+
+                if ($attempt->topup_session_id !== null) {
+                    $session = SimcardTopupSession::query()
+                        ->where('id', $attempt->topup_session_id)
+                        ->lockForUpdate()
+                        ->first();
+
+                    if (
+                        $session !== null
+                        && strtoupper(trim((string) $session->status)) === 'PENDING_PAYMENT'
+                        && trim((string) $session->commerce_order_id) === ''
+                    ) {
+                        $session->status = 'CANCELLED';
+                        $session->failure_reason = 'Auto Top-Up was disabled before payment started.';
+                        $session->save();
+                    }
+                }
+
+                $configMeta = is_array($config->meta) ? $config->meta : [];
+                $configMeta['state_before_disable'] = self::STATE_ARMED;
+                $config->state = self::STATE_DISABLED;
+                $config->failure_reason = null;
+                $config->meta = $configMeta;
+                $config->save();
+
+                return false;
+            }
+
+            if (empty($meta['commerce_request_started_at'])) {
+                $meta['commerce_request_started_at'] = now()->toIso8601String();
+                $attempt->meta = $meta;
+                $attempt->save();
+            }
+
+            return true;
+        });
+    }
+
     /** @return array<string,mixed> */
     private function requestCommerceCharge(SimcardAutoTopup $config, SimcardAutoTopupAttempt $attempt, string $packageCode): array
     {
@@ -796,6 +978,7 @@ class EsimAutoTopupService
             ->post($url, [
                 'parent_order_id' => (string) $config->parent_commerce_order_id,
                 'parent_order_item_id' => (string) $config->parent_commerce_order_item_id,
+                'simcard_id' => (string) $config->simcard_id,
                 'commerce_unit' => (int) $config->commerce_unit,
                 'topup_session_id' => (string) $attempt->topup_session_id,
                 'package_code' => $packageCode,
@@ -904,7 +1087,14 @@ class EsimAutoTopupService
 
             $lockedConfig = SimcardAutoTopup::query()->where('id', $config->id)->lockForUpdate()->first();
             if ($lockedConfig !== null && $lockedConfig->state !== self::STATE_WAITING_REARM) {
-                $lockedConfig->state = self::STATE_PAUSED;
+                $meta = is_array($lockedConfig->meta) ? $lockedConfig->meta : [];
+                if ($lockedConfig->enabled) {
+                    $lockedConfig->state = self::STATE_PAUSED;
+                } else {
+                    $meta['state_before_disable'] = self::STATE_PAUSED;
+                    $lockedConfig->state = self::STATE_DISABLED;
+                    $lockedConfig->meta = $meta;
+                }
                 $lockedConfig->failure_reason = $lockedAttempt->failure_reason;
                 $lockedConfig->save();
             }
@@ -1274,6 +1464,16 @@ class EsimAutoTopupService
             $locked = SimcardAutoTopup::query()->where('id', $config->id)->lockForUpdate()->firstOrFail();
             if ($locked->state !== self::STATE_WAITING_REARM) {
                 return $locked;
+            }
+
+            if (! $locked->enabled) {
+                $meta = is_array($locked->meta) ? $locked->meta : [];
+                $meta['state_before_disable'] = self::STATE_WAITING_REARM;
+                $locked->state = self::STATE_DISABLED;
+                $locked->meta = $meta;
+                $locked->save();
+
+                return $locked->fresh();
             }
 
             $locked->cycle = max(1, (int) $locked->cycle) + 1;

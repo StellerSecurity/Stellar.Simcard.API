@@ -23,6 +23,8 @@ Route::prefix('v1/topupcontroller')
 Route::prefix('v1/autotopupcontroller')
     ->middleware('stellar.sim.basic')
     ->group(function () {
+        Route::get('/status', [EsimAutoTopupController::class, 'status']);
+        Route::post('/manage', [EsimAutoTopupController::class, 'manage']);
         Route::post('/payment-failed', [EsimAutoTopupController::class, 'paymentFailed']);
     });
 
