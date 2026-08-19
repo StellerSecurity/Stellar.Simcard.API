@@ -83,12 +83,8 @@ class UnusedEsimCancellationService
 
     private function assertLocalStateStillUnused(Simcard $simcard): void
     {
-        if (
-            ($simcard->order_usage !== null && (int) $simcard->order_usage > 0)
-            || $simcard->activated_at !== null
-            || $simcard->first_used_at !== null
-        ) {
-            throw new \DomainException('The eSIM has already been installed or used and cannot be cancelled automatically.');
+        if ($simcard->order_usage !== null && (int) $simcard->order_usage > 0) {
+            throw new \DomainException('The eSIM has used data and cannot be cancelled automatically.');
         }
     }
 
@@ -178,8 +174,12 @@ class UnusedEsimCancellationService
             'has_eid' => $this->eid($esim) !== null,
         ]);
 
+        if ($usage !== null && $usage > 0) {
+            throw new \DomainException('The provider reports data usage on this eSIM, so it cannot be cancelled automatically.');
+        }
+
         throw new \DomainException(
-            'The provider reports that this eSIM is no longer eligible for cancellation. Current status: '
+            'The provider reports that this eSIM is not eligible for cancellation. Current status: '
             .($smdpStatus !== '' ? $smdpStatus : 'UNKNOWN')
             .' / '
             .($esimStatus !== '' ? $esimStatus : 'UNKNOWN')
@@ -192,21 +192,21 @@ class UnusedEsimCancellationService
         $esimStatus = $this->normalizedStatus($esim['esimStatus'] ?? null);
         $smdpStatus = $this->normalizedStatus($esim['smdpStatus'] ?? null);
         $usage = $this->usedBytes($esim);
-        $activatedAt = $this->activationTime($esim);
-        $eid = $this->eid($esim);
 
         if ($this->isCancelled($esim)) {
             return 'cancellable';
         }
 
-        // Definite usage / installation evidence always blocks an automatic refund.
-        if (($usage !== null && $usage > 0) || $activatedAt !== null || $eid !== null) {
-            return 'blocked';
+        // Business rule: usage is the decisive eligibility signal. A profile may be
+        // installed, activated, have an EID, or report IN_USE and is still eligible when
+        // the provider reports exactly 0 bytes consumed. The provider cancel endpoint
+        // remains the final authority before any refund is issued.
+        if ($usage !== null) {
+            return $usage > 0 ? 'blocked' : 'cancellable';
         }
 
-        // eSIMAccess documents RELEASED + GOT_RESOURCE as the cancellable state.
-        // Some fresh profiles omit orderUsage temporarily; the provider cancel endpoint
-        // is still authoritative, so missing usage must not create a false rejection.
+        // Fresh uninstalled profiles may temporarily omit orderUsage. Preserve the
+        // RELEASED + GOT_RESOURCE path and let the provider cancel endpoint decide.
         if (
             $esimStatus === self::CANCELLABLE_ESIM_STATUS
             && $smdpStatus === self::CANCELLABLE_SMDP_STATUS
@@ -214,20 +214,9 @@ class UnusedEsimCancellationService
             return 'cancellable';
         }
 
-        // Fresh orders can briefly be visible before allocation is complete. That is a
-        // retryable state, not evidence that the customer installed or used the eSIM.
-        if (
-            in_array($esimStatus, self::TRANSITIONAL_ESIM_STATUSES, true)
-            && ($smdpStatus === '' || $smdpStatus === self::CANCELLABLE_SMDP_STATUS)
-        ) {
-            return 'transitional';
-        }
-
-        if ($esimStatus === self::CANCELLABLE_ESIM_STATUS && $smdpStatus === '') {
-            return 'transitional';
-        }
-
-        return 'blocked';
+        // Usage is not available yet. Do not infer that installation means usage; retry
+        // until the provider exposes usage, then 0 bytes is eligible and >0 is blocked.
+        return 'transitional';
     }
 
     private function assertProviderAcceptedCancellation(array $response): void

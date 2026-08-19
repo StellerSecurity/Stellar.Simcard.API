@@ -48,12 +48,21 @@ it('blocks cancellation when provider usage is positive', function (): void {
     ]))->toBe('blocked');
 });
 
-it('blocks cancellation when the profile has installation evidence', function (): void {
+it('allows an installed in-use profile when provider usage is exactly zero', function (): void {
     expect(cancellationEligibility([
         'smdpStatus' => 'ENABLED',
-        'esimStatus' => 'GOT_RESOURCE',
+        'esimStatus' => 'IN_USE',
         'orderUsage' => 0,
-        'activateTime' => null,
+        'activateTime' => '2026-08-19T10:00:00Z',
         'eid' => '89049032000000000000000000000001',
-    ]))->toBe('blocked');
+    ]))->toBe('cancellable');
+});
+
+it('treats installed profiles with unknown usage as retryable', function (): void {
+    expect(cancellationEligibility([
+        'smdpStatus' => 'ENABLED',
+        'esimStatus' => 'IN_USE',
+        'activateTime' => '2026-08-19T10:00:00Z',
+        'eid' => '89049032000000000000000000000001',
+    ]))->toBe('transitional');
 });
