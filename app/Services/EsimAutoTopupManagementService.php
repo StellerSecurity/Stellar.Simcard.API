@@ -248,7 +248,7 @@ class EsimAutoTopupManagementService
             $config->parent_commerce_order_item_id = (string) $lockedSimcard->commerce_order_item_id;
             $config->commerce_unit = max(1, (int) $lockedSimcard->commerce_unit);
             $config->enabled = true;
-            $config->trigger_percent = 35;
+            $config->trigger_percent = 50;
             $config->preferred_data_bytes = $dataBytes;
             $config->preferred_duration_days = isset($commerce['duration_days']) && is_numeric($commerce['duration_days'])
                 ? max(1, (int) $commerce['duration_days'])
@@ -314,7 +314,7 @@ class EsimAutoTopupManagementService
             $config->commerce_unit = max(1, (int) $lockedSimcard->commerce_unit);
             $config->enabled = false;
             $config->state = self::STATE_DISABLED;
-            $config->trigger_percent = 35;
+            $config->trigger_percent = 50;
             $config->preferred_data_bytes = max(1, (int) ($lockedSimcard->total_volume ?? 0));
             $config->preferred_duration_days = null;
             $config->cycle = 1;
