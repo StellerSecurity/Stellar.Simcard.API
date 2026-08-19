@@ -192,6 +192,28 @@ class EsimaccessProvider implements EsimProvider
             ->json();
     }
 
+    public function cancelEsim(string $esimTranNo, string $account = self::ACCOUNT_PRIMARY): array
+    {
+        $payload = ['esimTranNo' => $esimTranNo];
+
+        $response = $this->http()
+            ->withHeaders($this->createHeaders($payload, $account))
+            ->post($this->baseUrl . '/v1/open/esim/cancel', $payload);
+
+        $body = $response->json();
+
+        // Provider eligibility failures are valid business responses. Return
+        // JSON bodies to the caller so they can be mapped without hiding the
+        // provider's state behind a generic HTTP exception.
+        if (is_array($body)) {
+            return $body;
+        }
+
+        $response->throw();
+
+        throw new RuntimeException('The eSIMAccess cancellation response was not valid JSON.');
+    }
+
     public function topup(string $iccid, string $packageCode, string $transactionId, string $account = self::ACCOUNT_PRIMARY): array
     {
         $payload = [

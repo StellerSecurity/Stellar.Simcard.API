@@ -4,6 +4,7 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\V1\SimcardController;
 use App\Http\Controllers\V1\TopupController;
 use App\Http\Controllers\V1\EsimAutoTopupController;
+use App\Http\Controllers\V1\UnusedEsimCancelController;
 use App\Http\Controllers\V1\Webhooks\EsimaccessWebhookController;
 
 Route::post('v1/webhooks/esimaccess', EsimaccessWebhookController::class);
@@ -39,6 +40,10 @@ Route::prefix('v1/sim')
 
         // POST /api/v1/sim/query
         Route::post('/query', [SimcardController::class, 'query']);
+
+        // POST /api/v1/sim/cancel
+        Route::post('/cancel', UnusedEsimCancelController::class)
+            ->middleware('throttle:sim.user.write');
 
         // POST /api/v1/sim/user
         Route::post('/user', [SimcardController::class, 'user'])
