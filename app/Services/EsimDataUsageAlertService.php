@@ -18,7 +18,7 @@ use Throwable;
 class EsimDataUsageAlertService
 {
     private const PROVIDER = 'esimaccess';
-    private const THRESHOLD_PERCENT = 50;
+    private const THRESHOLD_PERCENT = 35;
     private const CHECK_INTERVAL_MINUTES = 60;
     private const DELIVERY_RETRY_COOLDOWN_MINUTES = 10;
 
