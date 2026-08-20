@@ -2,6 +2,7 @@
 
 use App\Services\Esim\EsimMarketingRefundOfferService;
 use App\Services\EsimAutoTopupService;
+use App\Services\EsimDataUsageAlertService;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Schedule;
@@ -71,5 +72,32 @@ Artisan::command('esim:send-auto-topup-sms {attempt}', function () {
 
 Schedule::command('esim:process-auto-topups')
     ->everyFiveMinutes()
+    ->withoutOverlapping();
+
+Artisan::command('esim:process-data-usage-alerts {--limit=100} {--simcard=} {--force : Ignore the normal provider polling interval}', function () {
+    $summary = app(EsimDataUsageAlertService::class)
+        ->processPending(
+            (int) $this->option('limit'),
+            $this->option('simcard') !== null ? (string) $this->option('simcard') : null,
+            (bool) $this->option('force'),
+        );
+
+    $this->info(sprintf(
+        'Processed: %d, refreshed: %d, triggered: %d, rearmed: %d, skipped: %d, failed: %d; SMS sent: %d; emails sent: %d',
+        $summary['processed'],
+        $summary['refreshed'],
+        $summary['triggered'],
+        $summary['rearmed'],
+        $summary['skipped'],
+        $summary['failed'],
+        $summary['sms_sent'],
+        $summary['email_sent'],
+    ));
+
+    return $summary['failed'] > 0 ? 1 : 0;
+})->purpose('Send 50% data alerts to active eSIMs without Auto Top-Up');
+
+Schedule::command('esim:process-data-usage-alerts')
+    ->everyFifteenMinutes()
     ->withoutOverlapping();
 
