@@ -343,6 +343,122 @@ class TopupService
         });
     }
 
+    /**
+     * Prepare an internally funded top-up used only to compose a virtual Stellar plan.
+     *
+     * No customer payment, Commerce checkout, Stripe call or Auto Top-Up state is
+     * involved. The requested package is revalidated against the ICCID-specific
+     * provider TOPUP catalogue before an auditable PAID session is created.
+     */
+    public function prepareIncludedVirtualTopupSession(
+        Simcard $simcard,
+        string $packageCode,
+        string $idempotencyKey,
+        ?string $commerceOrderId = null,
+        ?string $commerceOrderItemId = null,
+        ?int $commerceUnit = null,
+        ?int $step = null,
+    ): SimcardTopupSession {
+        $packageCode = $this->normalizePackageCode($packageCode);
+        $idempotencyKey = trim($idempotencyKey);
+
+        if (strlen($idempotencyKey) < 16 || strlen($idempotencyKey) > 128) {
+            throw new RuntimeException('Virtual-plan top-up idempotency key is invalid.', 422);
+        }
+
+        $existing = SimcardTopupSession::query()
+            ->where('idempotency_key', $idempotencyKey)
+            ->first();
+
+        if ($existing !== null) {
+            if ((string) $existing->simcard_id !== (string) $simcard->id) {
+                throw new RuntimeException('Virtual-plan top-up idempotency key belongs to another eSIM.', 409);
+            }
+
+            return $existing;
+        }
+
+        $this->assertIncludedVirtualTopupEligible($simcard);
+        $iccid = $this->decryptIccid($simcard);
+        if ($iccid === null || trim($iccid) === '') {
+            throw new RuntimeException('Virtual-plan top-up is not ready yet for this eSIM.', 503);
+        }
+
+        $account = $this->resolveProviderAccount($simcard, $iccid);
+        $this->assertProviderTopupEligible($iccid, $account, true);
+        $providerPlans = $this->provider->listPlans([
+            'type' => 'TOPUP',
+            'iccid' => $iccid,
+        ], $account);
+        $plans = $this->fixedTopupPlans($this->normalizeTopupPlans($providerPlans));
+        $matchedPlan = $this->findPlanByPackageCode($plans, $packageCode);
+
+        if ($matchedPlan === null) {
+            throw new RuntimeException('Virtual-plan top-up package is not available for this eSIM yet.', 503);
+        }
+
+        $canonicalPackageCode = (string) (
+            $matchedPlan['package_code']
+            ?? $matchedPlan['provider_topup_slug']
+            ?? $matchedPlan['provider_topup_value']
+            ?? $packageCode
+        );
+
+        return DB::transaction(function () use (
+            $simcard,
+            $matchedPlan,
+            $canonicalPackageCode,
+            $packageCode,
+            $idempotencyKey,
+            $commerceOrderId,
+            $commerceOrderItemId,
+            $commerceUnit,
+            $step,
+        ): SimcardTopupSession {
+            $existing = SimcardTopupSession::query()
+                ->where('idempotency_key', $idempotencyKey)
+                ->lockForUpdate()
+                ->first();
+
+            if ($existing !== null) {
+                if ((string) $existing->simcard_id !== (string) $simcard->id) {
+                    throw new RuntimeException('Virtual-plan top-up idempotency key belongs to another eSIM.', 409);
+                }
+
+                return $existing;
+            }
+
+            $session = new SimcardTopupSession();
+            $session->id = (string) Str::uuid();
+            $session->simcard_id = (string) $simcard->id;
+            $session->action_link_id = null;
+            $session->package_code = $canonicalPackageCode;
+            $session->package_name = (string) ($matchedPlan['name'] ?? $matchedPlan['package_name'] ?? $canonicalPackageCode);
+            $session->data_bytes = (int) ($matchedPlan['data_bytes'] ?? 0);
+            $session->duration_days = isset($matchedPlan['duration_days']) ? (int) $matchedPlan['duration_days'] : null;
+            $session->price_cents = (int) ($matchedPlan['price_cents'] ?? $matchedPlan['unit_price_cents'] ?? 0);
+            $session->currency = strtoupper((string) ($matchedPlan['currency'] ?? 'USD'));
+            $session->status = self::STATUS_PAID;
+            $session->idempotency_key = $idempotencyKey;
+            $session->commerce_order_id = $commerceOrderId ?: null;
+            $session->commerce_order_item_id = $commerceOrderItemId ?: null;
+            $session->meta = array_filter([
+                'source' => 'virtual_plan_fulfillment',
+                'customer_charge' => false,
+                'requested_package_code' => $packageCode,
+                'commerce_unit' => $commerceUnit,
+                'virtual_topup_step' => $step,
+                'plan' => $this->safePlanPayload($matchedPlan),
+                'simcard_snapshot' => $this->safeSimPayload($simcard),
+            ], static fn ($value) => $value !== null && $value !== '');
+            $session->requested_at = now();
+            $session->paid_at = now();
+            $session->save();
+
+            return $session;
+        });
+    }
+
     public function fulfill(string $topupSessionId, ?string $commerceOrderId = null, ?string $commerceOrderItemId = null, ?string $idempotencyKey = null): array
     {
         $topupSessionId = $this->normalizeUuid($topupSessionId, 'Top-up session id is invalid.');
@@ -366,11 +482,18 @@ class TopupService
             throw new RuntimeException('Top-up eSIM could not be found.', 404);
         }
 
-        $this->assertTopupEligible($simcard);
+        if ($this->isIncludedVirtualTopupSession($session)) {
+            $this->assertIncludedVirtualTopupEligible($simcard);
+        } else {
+            $this->assertTopupEligible($simcard);
+        }
 
         $iccid = $this->decryptIccid($simcard);
         if ($iccid === null) {
-            throw new RuntimeException('Top-up is not ready yet for this eSIM.', 409);
+            throw new RuntimeException(
+                'Top-up is not ready yet for this eSIM.',
+                $this->isIncludedVirtualTopupSession($session) ? 503 : 409,
+            );
         }
 
         // Do not use the Commerce idempotency key here; it can exceed the provider limit.
@@ -380,7 +503,11 @@ class TopupService
             // Resolve ownership with a read-only request, then revalidate the selected
             // package against the provider's ICCID-specific TOPUP catalogue.
             $account = $this->resolveProviderAccount($simcard, $iccid);
-            $this->assertProviderTopupEligible($iccid, $account);
+            $this->assertProviderTopupEligible(
+                $iccid,
+                $account,
+                $this->isIncludedVirtualTopupSession($session),
+            );
             [$providerPlan, $providerTopupValue] = $this->resolveProviderPlanForFulfillment(
                 $session,
                 $iccid,
@@ -919,13 +1046,16 @@ class TopupService
         return $exception instanceof ConnectionException;
     }
 
-    private function assertProviderTopupEligible(string $iccid, string $account): void
+    private function assertProviderTopupEligible(string $iccid, string $account, bool $retryWhenUnavailable = false): void
     {
         $response = $this->provider->queryEsim(null, $iccid, $account);
         $esim = Arr::get($response, 'obj.esimList.0');
 
         if (! is_array($esim)) {
-            throw new RuntimeException('The eSIM could not be verified for top-up.', 409);
+            throw new RuntimeException(
+                'The eSIM could not be verified for top-up.',
+                $retryWhenUnavailable ? 503 : 409,
+            );
         }
 
         $status = strtoupper(trim((string) ($esim['esimStatus'] ?? '')));
@@ -982,7 +1112,10 @@ class TopupService
         }
 
         if ($matchedPlan === null) {
-            throw new RuntimeException('Selected top-up package is no longer available for this eSIM.', 409);
+            throw new RuntimeException(
+                'Selected top-up package is no longer available for this eSIM.',
+                $this->isIncludedVirtualTopupSession($session) ? 503 : 409,
+            );
         }
 
         $providerTopupValue = $this->stringFromKeys($matchedPlan, [
@@ -993,7 +1126,10 @@ class TopupService
         ]);
 
         if ($providerTopupValue === null) {
-            throw new RuntimeException('The provider top-up package could not be resolved.', 409);
+            throw new RuntimeException(
+                'The provider top-up package could not be resolved.',
+                $this->isIncludedVirtualTopupSession($session) ? 503 : 409,
+            );
         }
 
         return [$matchedPlan, $providerTopupValue];
@@ -1070,6 +1206,30 @@ class TopupService
     {
         if (strtoupper(trim((string) $simcard->esim_status)) !== 'IN_USE') {
             throw new RuntimeException('Auto Top-Up only runs while the eSIM is IN_USE.', 409);
+        }
+    }
+
+    private function isIncludedVirtualTopupSession(SimcardTopupSession $session): bool
+    {
+        $meta = is_array($session->meta) ? $session->meta : [];
+
+        return (string) ($meta['source'] ?? '') === 'virtual_plan_fulfillment'
+            && filter_var($meta['customer_charge'] ?? false, FILTER_VALIDATE_BOOLEAN) === false;
+    }
+
+    /**
+     * Included virtual-plan top-ups are allowed before installation. eSIMAccess
+     * explicitly supports top-up while a profile is New; the live provider query
+     * and ICCID-specific TOPUP catalogue remain the final authority.
+     */
+    private function assertIncludedVirtualTopupEligible(Simcard $simcard): void
+    {
+        $status = strtoupper(trim((string) $simcard->esim_status));
+
+        foreach (['EXPIRED', 'CANCEL', 'CANCELED', 'CANCELLED', 'REVOKED'] as $terminal) {
+            if ($status !== '' && str_contains($status, $terminal)) {
+                throw new RuntimeException('This eSIM is no longer eligible for the included virtual-plan top-up.', 409);
+            }
         }
     }
 

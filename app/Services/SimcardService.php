@@ -11,6 +11,7 @@ use App\Services\Esim\SimcardUserReferenceService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
+use RuntimeException;
 use Throwable;
 
 class SimcardService
@@ -30,6 +31,19 @@ class SimcardService
         return $this->provider->listPlans($filters);
     }
 
+    /** Internal lookup by private plan_id; the plaintext identifier is never persisted. */
+    public function findByPlanId(string $planId): ?Simcard
+    {
+        $normalized = preg_replace('/\s+/', '', trim($planId));
+        if (! is_string($normalized) || preg_match('/^\d{16}$/', $normalized) !== 1) {
+            return null;
+        }
+
+        return Simcard::query()
+            ->where('plan_id_hash', $this->crypto->derivePlanHash($normalized))
+            ->first();
+    }
+
     /** Create eSIM order using a client-side generated plan_id (idempotent per plan_id_hash) */
     public function orderEsim(
         ?int $userId,
@@ -41,7 +55,8 @@ class SimcardService
         ?string $commerceOrderId = null,
         ?string $commerceOrderItemId = null,
         ?int $commerceUnit = null,
-        ?string $idempotencyKey = null
+        ?string $idempotencyKey = null,
+        ?array $virtualFulfillmentRecipe = null
     ): Simcard {
 
         $planId = preg_replace('/\s+/', '', (string) $planId);
@@ -51,7 +66,14 @@ class SimcardService
         $commerceUnit = $commerceUnit !== null && $commerceUnit > 0 ? $commerceUnit : null;
         $idempotencyKey = $this->normalizeNullableIdentifier($idempotencyKey);
 
-        return DB::transaction(function () use ($planIdHash, $userId, $accountRef, $packageCode, $planId, $email, $emailSource, $commerceOrderId, $commerceOrderItemId, $commerceUnit, $idempotencyKey) {
+        // Deploy-safe isolation: normal eSIM orders must not depend on the virtual
+        // recipe migration. A virtual order fails before provider spend until its
+        // durable recipe column exists, while normal /sim/order remains untouched.
+        if ($virtualFulfillmentRecipe !== null && ! Schema::hasColumn('simcards', 'virtual_fulfillment_recipe')) {
+            throw new RuntimeException('Virtual-plan fulfillment storage is not migrated yet.', 503);
+        }
+
+        return DB::transaction(function () use ($planIdHash, $userId, $accountRef, $packageCode, $planId, $email, $emailSource, $commerceOrderId, $commerceOrderItemId, $commerceUnit, $idempotencyKey, $virtualFulfillmentRecipe) {
             // If Commerce retries the same paid order item, do not create a second provider order.
             $existing = $this->findExistingSimcardForOrderRequest(
                 planIdHash: $planIdHash,
@@ -62,6 +84,20 @@ class SimcardService
             );
 
             if ($existing) {
+                if ($virtualFulfillmentRecipe !== null) {
+                    if (! hash_equals((string) $existing->package_code, $packageCode)) {
+                        throw new \RuntimeException(
+                            'Existing eSIM package does not match the locked virtual-plan base package.',
+                            409,
+                        );
+                    }
+
+                    if (! is_array($existing->virtual_fulfillment_recipe)) {
+                        $existing->virtual_fulfillment_recipe = $virtualFulfillmentRecipe;
+                        $existing->save();
+                    }
+                }
+
                 $this->storeEmailOnSimcard($existing, $email, $emailSource);
                 $this->attachCommerceIdempotencyMetadata($existing, $commerceOrderId, $commerceOrderItemId, $commerceUnit, $idempotencyKey);
                 $this->attachUserReference($existing, $userId, 'purchase');
@@ -78,7 +114,7 @@ class SimcardService
 
             $externalOrderIdHash = $this->crypto->deriveExternalOrderHash($order->externalOrderId);
 
-            $simcard = Simcard::create([
+            $attributes = [
                 'id'                    => (string) Str::uuid(),
                 'plan_id_hash'          => $planIdHash,
                 'provider'              => 'esimaccess',
@@ -96,7 +132,13 @@ class SimcardService
                 'commerce_unit'          => $commerceUnit,
                 'idempotency_key'        => $idempotencyKey,
                 'purchased_on'           => now(),
-            ]);
+            ];
+
+            if ($virtualFulfillmentRecipe !== null) {
+                $attributes['virtual_fulfillment_recipe'] = $virtualFulfillmentRecipe;
+            }
+
+            $simcard = Simcard::create($attributes);
 
             $this->storeEmailOnSimcard($simcard, $email, $emailSource);
 
@@ -115,7 +157,8 @@ class SimcardService
         ?string $commerceOrderId = null,
         ?string $commerceOrderItemId = null,
         ?int $commerceUnit = null,
-        ?string $idempotencyKey = null
+        ?string $idempotencyKey = null,
+        ?array $virtualFulfillmentRecipe = null
     ): array {
         $simcard = $this->orderEsim(
             userId: $userId,
@@ -128,6 +171,7 @@ class SimcardService
             commerceOrderItemId: $commerceOrderItemId,
             commerceUnit: $commerceUnit,
             idempotencyKey: $idempotencyKey,
+            virtualFulfillmentRecipe: $virtualFulfillmentRecipe,
         );
 
         $install = $this->fetchInstallInfoWithRetry($planId);
@@ -576,6 +620,53 @@ class SimcardService
         return $this->crypto->decryptEmail($simcard->email_enc);
     }
 
+    /**
+     * Ensure a newly created eSIM has a privately stored ICCID before an internal
+     * included top-up is attempted. This is intentionally called only by the
+     * virtual-plan path; normal eSIM fulfillment remains unchanged.
+     */
+    public function ensureProviderIccid(Simcard $simcard, string $planId): Simcard
+    {
+        if (! empty($simcard->iccid_enc) && ! empty($simcard->iccid_hash)) {
+            return $simcard;
+        }
+
+        $normalizedPlanId = preg_replace('/\s+/', '', trim($planId));
+        if (! is_string($normalizedPlanId) || preg_match('/^\d{16}$/', $normalizedPlanId) !== 1) {
+            throw new RuntimeException('Virtual-plan private plan identifier is invalid.', 422);
+        }
+
+        if (! hash_equals((string) $simcard->plan_id_hash, $this->crypto->derivePlanHash($normalizedPlanId))) {
+            throw new RuntimeException('Virtual-plan eSIM identity does not match the supplied private plan identifier.', 409);
+        }
+
+        $externalOrderId = $this->crypto->decryptForPlan(
+            $normalizedPlanId,
+            $simcard->external_order_id_enc
+        );
+
+        for ($i = 0; $i < 10; $i++) {
+            $provider = $this->provider->queryOrder(
+                $externalOrderId,
+                $this->preferredProviderAccount($simcard)
+            );
+
+            $this->storeProviderIccid($simcard, $provider);
+            $simcard->refresh();
+
+            if (! empty($simcard->iccid_enc) && ! empty($simcard->iccid_hash)) {
+                return $simcard;
+            }
+
+            usleep(350_000);
+        }
+
+        // The provider can allocate the ICCID shortly after the install payload.
+        // Surface this as retryable so Commerce never turns propagation delay into
+        // a permanent failed paid order.
+        throw new RuntimeException('Provider ICCID is not ready yet for virtual-plan top-up.', 503);
+    }
+
     /** Fetch install payload with a short retry loop. */
     private function fetchInstallInfoWithRetry(string $planId): array
     {
@@ -600,6 +691,11 @@ class SimcardService
                 $this->preferredProviderAccount($simcard)
             );
 
+            // Capture the provider ICCID privately as soon as it is allocated. This
+            // enables provider-approved included top-ups while the eSIM is still NEW,
+            // without waiting for a later webhook. The plaintext ICCID is never exposed.
+            $this->storeProviderIccid($simcard, $provider);
+
             $install = $this->buildInstallPayload($provider);
             $best = array_replace($best, array_filter(
                 $install,
@@ -621,6 +717,40 @@ class SimcardService
         $this->storeInstallPayload($simcard, $planId, $best);
 
         return $this->withLegacyInstallAliases($best);
+    }
+
+    private function storeProviderIccid(Simcard $simcard, array $provider): void
+    {
+        $esim = $this->firstProviderEsim($provider);
+        if ($esim === []) {
+            return;
+        }
+
+        $iccid = $this->firstString([
+            $esim['iccid'] ?? null,
+            $esim['ICCID'] ?? null,
+            $esim['simIccid'] ?? null,
+            $esim['sim_iccid'] ?? null,
+        ]);
+
+        if ($iccid === null) {
+            return;
+        }
+
+        $iccid = preg_replace('/\s+/', '', $iccid);
+        if (! is_string($iccid) || preg_match('/^\d{10,32}$/', $iccid) !== 1) {
+            return;
+        }
+
+        $hash = $this->crypto->deriveIccidHash($iccid);
+        if ((string) ($simcard->iccid_hash ?? '') === $hash && ! empty($simcard->iccid_enc)) {
+            return;
+        }
+
+        $simcard->iccid_enc = $this->crypto->encryptSensitiveValue($iccid);
+        $simcard->iccid_hash = $hash;
+        $simcard->iccid_last4 = $this->crypto->last4($iccid);
+        $simcard->save();
     }
 
     private function preferredProviderAccount(Simcard $simcard): string

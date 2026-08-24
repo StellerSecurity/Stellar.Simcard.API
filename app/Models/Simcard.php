@@ -24,6 +24,7 @@ class Simcard extends Model
         'user_linked_at' => 'datetime',
         'install_payload_captured_at' => 'datetime',
         'install_payload_crypto_version' => 'integer',
+        'virtual_fulfillment_recipe' => 'array',
     ];
 
     protected $fillable = [
@@ -31,6 +32,7 @@ class Simcard extends Model
         'provider',
         'provider_account',
         'package_code',
+        'virtual_fulfillment_recipe',
         'external_order_id_enc',
         'external_order_id_hash',
         'install_payload_enc',
@@ -78,6 +80,7 @@ class Simcard extends Model
         'iccid_enc',
         'iccid_hash',
         'plan_id_hash',
+        'virtual_fulfillment_recipe',
         'email_enc',
         'email_hash',
         'user_id',

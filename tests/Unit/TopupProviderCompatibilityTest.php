@@ -123,3 +123,28 @@ it('does not expose Day Pass plans through the fixed-plan fulfillment contract',
 
     expect($fixedPlans)->toBe([]);
 });
+
+it('allows internally funded virtual topups before first use without relaxing customer topup rules', function (): void {
+    $service = topupServiceWithoutConstructor();
+    $simcard = new \App\Models\Simcard();
+    $simcard->forceFill([
+        'esim_status' => 'GOT_RESOURCE',
+        'state' => 'pending',
+    ]);
+
+    // Included virtual composition may run before installation.
+    invokeTopupPrivate($service, 'assertIncludedVirtualTopupEligible', [$simcard]);
+
+    // Existing customer-initiated top-up contract remains IN_USE-only.
+    expect(fn () => invokeTopupPrivate($service, 'assertTopupEligible', [$simcard]))
+        ->toThrow(RuntimeException::class, 'Only eSIMs currently in use can be topped up.');
+});
+
+it('blocks included virtual topups for terminal esim states', function (): void {
+    $service = topupServiceWithoutConstructor();
+    $simcard = new \App\Models\Simcard();
+    $simcard->forceFill(['esim_status' => 'EXPIRED']);
+
+    expect(fn () => invokeTopupPrivate($service, 'assertIncludedVirtualTopupEligible', [$simcard]))
+        ->toThrow(RuntimeException::class, 'no longer eligible');
+});

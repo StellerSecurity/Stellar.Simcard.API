@@ -6,11 +6,14 @@ use App\Exceptions\SimcardOwnershipConflictException;
 use App\Http\Controllers\Controller;
 use App\Services\SimcardService;
 use App\Services\EsimAutoTopupService;
+use App\Services\VirtualEsimFulfillmentService;
+use App\Services\VirtualEsimPlanResolver;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
+use RuntimeException;
 use Throwable;
 
 class SimcardController extends Controller
@@ -28,6 +31,8 @@ class SimcardController extends Controller
     public function __construct(
         private readonly SimcardService $simcardService,
         private readonly EsimAutoTopupService $autoTopupService,
+        private readonly VirtualEsimFulfillmentService $virtualEsimFulfillment,
+        private readonly VirtualEsimPlanResolver $virtualEsimPlanResolver,
     ) {}
 
     public function plans(Request $request): JsonResponse
@@ -117,6 +122,179 @@ class SimcardController extends Controller
                     'auto_topup_configured' => $autoTopupConfigured,
                 ],
                 'install' => $result['install'],
+            ],
+        ], 201);
+    }
+
+    /**
+     * Resolve a virtual Stellar plan without purchasing an eSIM.
+     *
+     * Used by Commerce catalog audits/preflight. A 422 response is a definitive
+     * "no exact composition" verdict; transient provider errors return 5xx.
+     */
+    public function virtualResolve(Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'virtual_plan' => ['required', 'array'],
+            'virtual_plan.target_data_bytes' => ['required', 'integer', 'min:1'],
+            'virtual_plan.target_duration_days' => ['required', 'integer', 'min:1', 'max:3650'],
+            'virtual_plan.candidates' => ['required', 'array', 'min:1', 'max:50'],
+            'virtual_plan.candidates.*.package_code' => ['required', 'string', 'max:128'],
+            'virtual_plan.candidates.*.data_bytes' => ['required', 'integer', 'min:1'],
+            'virtual_plan.candidates.*.duration_days' => ['required', 'integer', 'min:1', 'max:3650'],
+            'virtual_plan.candidates.*.variant_id' => ['nullable', 'string', 'max:64'],
+            'virtual_plan.candidates.*.name' => ['nullable', 'string', 'max:200'],
+            'virtual_plan.candidates.*.active' => ['nullable', 'boolean'],
+        ]);
+
+        if ($validator->fails()) {
+            return $this->validationError($validator->errors()->toArray());
+        }
+
+        $virtual = $validator->validated()['virtual_plan'];
+
+        try {
+            $recipe = $this->virtualEsimPlanResolver->resolve(
+                candidates: (array) $virtual['candidates'],
+                targetDataBytes: (int) $virtual['target_data_bytes'],
+                targetDurationDays: (int) $virtual['target_duration_days'],
+            );
+        } catch (RuntimeException $exception) {
+            $status = (int) $exception->getCode();
+            if ($status < 400 || $status > 599) {
+                $status = 500;
+            }
+
+            return response()->json([
+                'response_code' => $status,
+                'response_message' => $exception->getMessage(),
+            ], $status);
+        } catch (Throwable $exception) {
+            Log::error('Virtual eSIM preflight resolution failed unexpectedly.', [
+                'exception' => basename(str_replace('\\', '/', get_class($exception))),
+            ]);
+
+            return response()->json([
+                'response_code' => 500,
+                'response_message' => 'Virtual eSIM preflight resolution failed.',
+            ], 500);
+        }
+
+        return response()->json([
+            'response_code' => 200,
+            'data' => [
+                'virtual_fulfillment' => $recipe,
+            ],
+        ], 200);
+    }
+
+    /**
+     * Provision a virtual Stellar plan as an exact provider composition.
+     *
+     * This endpoint is intentionally separate from /order. Normal eSIM orders keep
+     * their existing contract and cannot accidentally enter virtual-plan logic.
+     */
+    public function virtualOrder(Request $request): JsonResponse
+    {
+        $this->normalizePlanId($request);
+
+        $validator = Validator::make($request->all(), [
+            'plan_id' => ['required', 'string', 'regex:/^\d{16}$/'],
+            'user_id' => ['nullable', 'integer', 'min:1'],
+            'email' => ['nullable', 'email', 'max:254'],
+            'commerce_order_id' => ['nullable', 'string', 'max:64'],
+            'commerce_order_item_id' => ['nullable', 'string', 'max:64'],
+            'commerce_unit' => ['nullable', 'integer', 'min:1', 'max:99'],
+            'idempotency_key' => ['nullable', 'string', 'max:128'],
+            'auto_topup' => ['nullable', 'array'],
+            'virtual_plan' => ['required', 'array'],
+            'virtual_plan.target_data_bytes' => ['required', 'integer', 'min:1'],
+            'virtual_plan.target_duration_days' => ['required', 'integer', 'min:1', 'max:3650'],
+            'virtual_plan.candidates' => ['required', 'array', 'min:1', 'max:50'],
+            'virtual_plan.candidates.*.package_code' => ['required', 'string', 'max:128'],
+            'virtual_plan.candidates.*.data_bytes' => ['required', 'integer', 'min:1'],
+            'virtual_plan.candidates.*.duration_days' => ['required', 'integer', 'min:1', 'max:3650'],
+            'virtual_plan.candidates.*.variant_id' => ['nullable', 'string', 'max:64'],
+            'virtual_plan.candidates.*.name' => ['nullable', 'string', 'max:200'],
+            'virtual_plan.candidates.*.active' => ['nullable', 'boolean'],
+        ]);
+
+        if ($validator->fails()) {
+            return $this->validationError($validator->errors()->toArray());
+        }
+
+        $data = $validator->validated();
+        $virtual = $data['virtual_plan'];
+
+        try {
+            $result = $this->virtualEsimFulfillment->orderAndCompose(
+                userId: isset($data['user_id']) ? (int) $data['user_id'] : null,
+                planId: (string) $data['plan_id'],
+                email: $data['email'] ?? null,
+                commerceOrderId: $data['commerce_order_id'] ?? null,
+                commerceOrderItemId: $data['commerce_order_item_id'] ?? null,
+                commerceUnit: isset($data['commerce_unit']) ? (int) $data['commerce_unit'] : null,
+                idempotencyKey: $data['idempotency_key'] ?? null,
+                targetDataBytes: (int) $virtual['target_data_bytes'],
+                targetDurationDays: (int) $virtual['target_duration_days'],
+                candidates: (array) $virtual['candidates'],
+            );
+        } catch (SimcardOwnershipConflictException $exception) {
+            return $this->ownershipConflict($exception->getMessage());
+        } catch (RuntimeException $exception) {
+            $status = (int) $exception->getCode();
+            if ($status < 400 || $status > 599) {
+                $status = 500;
+            }
+
+            return response()->json([
+                'response_code' => $status,
+                'response_message' => $exception->getMessage(),
+            ], $status);
+        } catch (Throwable $exception) {
+            Log::error('Virtual eSIM fulfillment failed unexpectedly.', [
+                'commerce_order_id' => (string) ($data['commerce_order_id'] ?? ''),
+                'commerce_order_item_id' => (string) ($data['commerce_order_item_id'] ?? ''),
+                'exception' => basename(str_replace('\\', '/', get_class($exception))),
+            ]);
+
+            return response()->json([
+                'response_code' => 500,
+                'response_message' => 'Virtual eSIM fulfillment failed.',
+            ], 500);
+        }
+
+        $autoTopupConfigured = false;
+        $autoTopup = $data['auto_topup'] ?? null;
+
+        if (is_array($autoTopup) && filter_var($autoTopup['enabled'] ?? false, FILTER_VALIDATE_BOOLEAN)) {
+            try {
+                $this->autoTopupService->configureForSimcard($result['simcard'], $autoTopup);
+                $autoTopupConfigured = true;
+            } catch (Throwable $exception) {
+                // Customer Auto Top-Up remains additive and independent from the included
+                // virtual-plan top-ups that were already queued independently above.
+                Log::error('Virtual eSIM base was provisioned but Auto Top-Up configuration failed.', [
+                    'simcard_id' => (string) $result['simcard']->id,
+                    'commerce_order_id' => (string) ($result['simcard']->commerce_order_id ?? ''),
+                    'commerce_order_item_id' => (string) ($result['simcard']->commerce_order_item_id ?? ''),
+                    'exception' => basename(str_replace('\\', '/', get_class($exception))),
+                ]);
+            }
+        }
+
+        return response()->json([
+            'response_code' => 201,
+            'data' => [
+                'simcard' => [
+                    'state' => $result['simcard']->state,
+                    'provider' => $result['simcard']->provider,
+                    'package_code' => $result['simcard']->package_code,
+                    'account_linked' => $result['simcard']->user_ref !== null,
+                    'auto_topup_configured' => $autoTopupConfigured,
+                ],
+                'install' => $result['install'],
+                'virtual_fulfillment' => $result['virtual_fulfillment'],
             ],
         ], 201);
     }

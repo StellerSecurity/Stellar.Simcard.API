@@ -40,6 +40,14 @@ Route::prefix('v1/sim')
         // POST /api/v1/sim/order
         Route::post('/order', [SimcardController::class, 'order']);
 
+        // POST /api/v1/sim/virtual-resolve
+        // Read-only preflight for Commerce catalog audits; never purchases provider data.
+        Route::post('/virtual-resolve', [SimcardController::class, 'virtualResolve']);
+
+        // POST /api/v1/sim/virtual-order
+        // Exact virtual-plan composition; never falls back to a larger BASE package.
+        Route::post('/virtual-order', [SimcardController::class, 'virtualOrder']);
+
         // POST /api/v1/sim/query
         Route::post('/query', [SimcardController::class, 'query']);
 
