@@ -15,6 +15,9 @@ class WholesaleWebhookRelay extends Model
         'provider',
         'payload_encrypted',
         'content_type',
+        'commerce_order_id',
+        'commerce_order_item_id',
+        'commerce_unit',
         'status',
         'attempts',
         'response_status',
@@ -32,6 +35,7 @@ class WholesaleWebhookRelay extends Model
     protected $casts = [
         'attempts' => 'integer',
         'response_status' => 'integer',
+        'commerce_unit' => 'integer',
         'received_at' => 'datetime',
         'last_attempt_at' => 'datetime',
         'next_attempt_at' => 'datetime',

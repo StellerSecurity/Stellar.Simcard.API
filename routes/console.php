@@ -107,11 +107,13 @@ Artisan::command('esim:retry-wholesale-webhook-relays {--limit=100}', function (
     $summary = app(WholesaleWebhookRelayService::class)->retryPending((int) $this->option('limit'));
 
     $this->info(sprintf(
-        'Processed: %d, delivered: %d, retrying: %d, failed: %d',
+        'Processed: %d, delivered: %d, retrying: %d, failed: %d, ignored: %d, in progress: %d',
         $summary['processed'],
         $summary['delivered'],
         $summary['retrying'],
         $summary['failed'],
+        $summary['ignored'],
+        $summary['in_progress'],
     ));
 
     return $summary['failed'] > 0 ? 1 : 0;

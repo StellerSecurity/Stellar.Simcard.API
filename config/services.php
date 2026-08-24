@@ -39,6 +39,7 @@ return [
         'webhook_relay_secret' => env('STELLAR_WHOLESALE_WEBHOOK_RELAY_SECRET'),
         'webhook_relay_connect_timeout' => (int) env('STELLAR_WHOLESALE_WEBHOOK_RELAY_CONNECT_TIMEOUT', 2),
         'webhook_relay_timeout' => (int) env('STELLAR_WHOLESALE_WEBHOOK_RELAY_TIMEOUT', 5),
+        'webhook_relay_stale_seconds' => (int) env('STELLAR_WHOLESALE_WEBHOOK_RELAY_STALE_SECONDS', 120),
     ],
 
     'stellar_data' => [
