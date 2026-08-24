@@ -1,6 +1,7 @@
 <?php
 
 use App\Services\Esim\EsimMarketingRefundOfferService;
+use App\Services\Esim\WholesaleWebhookRelayService;
 use App\Services\EsimAutoTopupService;
 use App\Services\EsimDataUsageAlertService;
 use Illuminate\Foundation\Inspiring;
@@ -101,3 +102,21 @@ Schedule::command('esim:process-data-usage-alerts')
     ->everyFifteenMinutes()
     ->withoutOverlapping();
 
+
+Artisan::command('esim:retry-wholesale-webhook-relays {--limit=100}', function () {
+    $summary = app(WholesaleWebhookRelayService::class)->retryPending((int) $this->option('limit'));
+
+    $this->info(sprintf(
+        'Processed: %d, delivered: %d, retrying: %d, failed: %d',
+        $summary['processed'],
+        $summary['delivered'],
+        $summary['retrying'],
+        $summary['failed'],
+    ));
+
+    return $summary['failed'] > 0 ? 1 : 0;
+})->purpose('Retry isolated webhook relays to Stellar Wholesale');
+
+Schedule::command('esim:retry-wholesale-webhook-relays --limit=100')
+    ->everyMinute()
+    ->withoutOverlapping();

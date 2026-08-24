@@ -34,6 +34,13 @@ return [
         ],
     ],
 
+    'stellar_wholesale' => [
+        'webhook_relay_url' => env('STELLAR_WHOLESALE_WEBHOOK_RELAY_URL'),
+        'webhook_relay_secret' => env('STELLAR_WHOLESALE_WEBHOOK_RELAY_SECRET'),
+        'webhook_relay_connect_timeout' => (int) env('STELLAR_WHOLESALE_WEBHOOK_RELAY_CONNECT_TIMEOUT', 2),
+        'webhook_relay_timeout' => (int) env('STELLAR_WHOLESALE_WEBHOOK_RELAY_TIMEOUT', 5),
+    ],
+
     'stellar_data' => [
         'topup_url' => env('STELLAR_DATA_TOPUP_URL', 'https://data.stellarsecurity.com/topup'),
         'topup_checkout_url' => env('STELLAR_DATA_TOPUP_CHECKOUT_URL'),

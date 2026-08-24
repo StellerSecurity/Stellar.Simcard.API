@@ -6,8 +6,10 @@ use App\Http\Controllers\V1\TopupController;
 use App\Http\Controllers\V1\EsimAutoTopupController;
 use App\Http\Controllers\V1\UnusedEsimCancelController;
 use App\Http\Controllers\V1\Webhooks\EsimaccessWebhookController;
+use App\Http\Middleware\RelayEsimaccessWebhookToWholesale;
 
-Route::post('v1/webhooks/esimaccess', EsimaccessWebhookController::class);
+Route::post('v1/webhooks/esimaccess', EsimaccessWebhookController::class)
+    ->middleware(RelayEsimaccessWebhookToWholesale::class);
 
 
 Route::prefix('v1/topupcontroller')
