@@ -375,7 +375,7 @@ class VirtualEsimFulfillmentService
             || ! is_numeric($deliveredBytes)
             || abs((int) $deliveredBytes - $targetDataBytes) > 1048576
             || ! is_numeric($deliveredDays)
-            || (int) $deliveredDays !== $targetDurationDays
+            || (int) $deliveredDays < $targetDurationDays
             || ! is_numeric($recipeTargetBytes)
             || abs((int) $recipeTargetBytes - $targetDataBytes) > 1048576
             || ! is_numeric($recipeTargetDays)
@@ -383,7 +383,7 @@ class VirtualEsimFulfillmentService
             || ! is_array($topups)
             || count($topups) > 10
         ) {
-            throw new RuntimeException('Stored virtual-plan fulfillment recipe does not match the advertised plan.', 409);
+            throw new RuntimeException('Stored virtual-plan fulfillment recipe does not match the advertised data or minimum validity.', 409);
         }
 
         return $recipe;

@@ -130,7 +130,7 @@ class SimcardController extends Controller
      * Resolve a virtual Stellar plan without purchasing an eSIM.
      *
      * Used by Commerce catalog audits/preflight. A 422 response is a definitive
-     * "no exact composition" verdict; transient provider errors return 5xx.
+     * "no exact-data composition with sufficient validity" verdict; transient provider errors return 5xx.
      */
     public function virtualResolve(Request $request): JsonResponse
     {
@@ -189,7 +189,8 @@ class SimcardController extends Controller
     }
 
     /**
-     * Provision a virtual Stellar plan as an exact provider composition.
+     * Provision a virtual Stellar plan with exact advertised data and at least
+     * the advertised validity. Extra validity is allowed; extra data is not.
      *
      * This endpoint is intentionally separate from /order. Normal eSIM orders keep
      * their existing contract and cannot accidentally enter virtual-plan logic.

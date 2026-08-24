@@ -14,8 +14,9 @@ use Throwable;
  * Resolves a virtual Stellar fixed-data plan into one real BASE package plus
  * zero or more provider-approved TOPUP packages.
  *
- * eSIMAccess top-ups add both data and validity. A recipe is therefore valid
- * only when BOTH totals exactly equal the advertised Stellar plan.
+ * eSIMAccess top-ups add both data and validity. Stellar's hard guarantee is
+ * exact advertised DATA. Provider validity may equal or exceed the advertised
+ * minimum validity because a TOPUP can only extend, never shorten, validity.
  */
 class VirtualEsimPlanResolver
 {
@@ -48,15 +49,20 @@ class VirtualEsimPlanResolver
             $baseBytes = (int) $candidate['data_bytes'];
             $baseDays = (int) $candidate['duration_days'];
 
-            // A stale virtual variant may now have an exact real package. Prefer it.
-            if ($this->sameData($baseBytes, $targetDataBytes) && $baseDays === $targetDurationDays) {
-                $solutions[] = $this->buildRecipe($candidate, [], $targetDataBytes, $targetDurationDays);
+            // A stale virtual variant may now have a real package with exact data.
+            // It is immediately valid when it already meets the advertised minimum
+            // validity. Extra validity is harmless; extra data is never allowed.
+            if ($this->sameData($baseBytes, $targetDataBytes)) {
+                if ($baseDays >= $targetDurationDays) {
+                    $solutions[] = $this->buildRecipe($candidate, [], $targetDataBytes, $targetDurationDays);
+                }
+
+                // Fixed-data TOPUPs would add data, so they cannot repair an
+                // exact-data BASE whose validity is too short.
                 continue;
             }
 
-            // Provider top-ups always add positive validity. A smaller-data base that
-            // already consumes all advertised validity can never become an exact recipe.
-            if ($baseDays >= $targetDurationDays || $baseBytes >= $targetDataBytes) {
+            if ($baseBytes >= $targetDataBytes) {
                 continue;
             }
 
@@ -79,8 +85,8 @@ class VirtualEsimPlanResolver
             }
 
             $remainingBytes = $targetDataBytes - $baseBytes;
-            $remainingDays = $targetDurationDays - $baseDays;
-            $combination = $this->findExactTopupCombination($topups, $remainingBytes, $remainingDays);
+            $minimumAdditionalDays = max(0, $targetDurationDays - $baseDays);
+            $combination = $this->findExactTopupCombination($topups, $remainingBytes, $minimumAdditionalDays);
 
             if ($combination !== null) {
                 $solutions[] = $this->buildRecipe(
@@ -111,17 +117,24 @@ class VirtualEsimPlanResolver
             }
 
             throw new RuntimeException(
-                'No exact provider composition exists for this virtual eSIM plan. Larger-plan fallback is disabled.',
+                'No exact-data provider composition exists for this virtual eSIM plan with at least the advertised validity. Larger-plan fallback is disabled.',
                 422,
             );
         }
 
         usort($solutions, static function (array $left, array $right): int {
-            // Fewer writes are operationally safer. Provider TOPUP price breaks ties.
+            // Fewer provider mutations are operationally safer.
             $leftCount = count($left['topups'] ?? []);
             $rightCount = count($right['topups'] ?? []);
             if ($leftCount !== $rightCount) {
                 return $leftCount <=> $rightCount;
+            }
+
+            // Keep delivered validity as close as possible to the advertised minimum.
+            $leftOver = max(0, (int) ($left['delivered_duration_days'] ?? PHP_INT_MAX) - (int) ($left['target_duration_days'] ?? 0));
+            $rightOver = max(0, (int) ($right['delivered_duration_days'] ?? PHP_INT_MAX) - (int) ($right['target_duration_days'] ?? 0));
+            if ($leftOver !== $rightOver) {
+                return $leftOver <=> $rightOver;
             }
 
             $leftCost = (int) ($left['topup_provider_price_raw_total'] ?? PHP_INT_MAX);
@@ -130,7 +143,7 @@ class VirtualEsimPlanResolver
                 return $leftCost <=> $rightCost;
             }
 
-            // With equal writes/cost, use the larger real BASE allowance.
+            // With equal writes/validity/cost, use the larger real BASE allowance.
             return (int) ($right['base']['data_bytes'] ?? 0) <=> (int) ($left['base']['data_bytes'] ?? 0);
         });
 
@@ -163,7 +176,6 @@ class VirtualEsimPlanResolver
                 || $dataBytes <= 0
                 || $durationDays <= 0
                 || $dataBytes > $targetDataBytes + self::MIB
-                || $durationDays > $targetDurationDays
             ) {
                 continue;
             }
@@ -185,30 +197,22 @@ class VirtualEsimPlanResolver
 
         usort($normalized, static function (array $left, array $right) use ($targetDataBytes, $targetDurationDays): int {
             $leftExact = abs((int) $left['data_bytes'] - $targetDataBytes) <= self::MIB
-                && (int) $left['duration_days'] === $targetDurationDays;
+                && (int) $left['duration_days'] >= $targetDurationDays;
             $rightExact = abs((int) $right['data_bytes'] - $targetDataBytes) <= self::MIB
-                && (int) $right['duration_days'] === $targetDurationDays;
+                && (int) $right['duration_days'] >= $targetDurationDays;
 
             if ($leftExact !== $rightExact) {
                 return $leftExact ? -1 : 1;
             }
 
-            // Repeated/similar top-ups are common. Base plans whose data-share and
-            // validity-share are similar are therefore the best candidates to try first.
-            $leftShareDelta = abs(
-                ((int) $left['data_bytes'] / $targetDataBytes)
-                - ((int) $left['duration_days'] / $targetDurationDays)
-            );
-            $rightShareDelta = abs(
-                ((int) $right['data_bytes'] / $targetDataBytes)
-                - ((int) $right['duration_days'] / $targetDurationDays)
-            );
-
-            if (abs($leftShareDelta - $rightShareDelta) > 0.000001) {
-                return $leftShareDelta <=> $rightShareDelta;
+            if ((int) $left['data_bytes'] !== (int) $right['data_bytes']) {
+                return (int) $right['data_bytes'] <=> (int) $left['data_bytes'];
             }
 
-            return (int) $right['data_bytes'] <=> (int) $left['data_bytes'];
+            $leftGap = abs((int) $left['duration_days'] - $targetDurationDays);
+            $rightGap = abs((int) $right['duration_days'] - $targetDurationDays);
+
+            return $leftGap <=> $rightGap;
         });
 
         return $normalized;
@@ -275,14 +279,14 @@ class VirtualEsimPlanResolver
      * @param array<int,array<string,mixed>> $topups
      * @return array<int,array<string,mixed>>|null
      */
-    private function findExactTopupCombination(array $topups, int $targetBytes, int $targetDays): ?array
+    private function findExactTopupCombination(array $topups, int $targetBytes, int $minimumAdditionalDays): ?array
     {
-        if ($targetBytes <= 0 || $targetDays <= 0) {
+        if ($targetBytes <= 0 || $minimumAdditionalDays < 0) {
             return null;
         }
 
         // Normalize data to MiB to absorb harmless catalog rounding differences while
-        // remaining exact at the product-unit level used by all current fixed plans.
+        // keeping the advertised data allowance exact at the product-unit level.
         $targetMib = (int) round($targetBytes / self::MIB);
         if ($targetMib <= 0) {
             return null;
@@ -292,7 +296,7 @@ class VirtualEsimPlanResolver
         foreach ($topups as $topup) {
             $mib = (int) round(((int) ($topup['data_bytes'] ?? 0)) / self::MIB);
             $days = (int) ($topup['duration_days'] ?? 0);
-            if ($mib <= 0 || $days <= 0 || $mib > $targetMib || $days > $targetDays) {
+            if ($mib <= 0 || $days <= 0 || $mib > $targetMib) {
                 continue;
             }
 
@@ -305,6 +309,8 @@ class VirtualEsimPlanResolver
         }
 
         // state key => ['mib', 'days', 'cost', 'items']
+        // We keep different validity totals because the first exact-data state may still
+        // be shorter than the advertised minimum. The search is bounded to 10 TOPUPs.
         $states = [
             '0:0' => ['mib' => 0, 'days' => 0, 'cost' => 0, 'items' => []],
         ];
@@ -321,7 +327,7 @@ class VirtualEsimPlanResolver
                     $mib = (int) $state['mib'] + (int) $option['_mib'];
                     $days = (int) $state['days'] + (int) $option['duration_days'];
 
-                    if ($mib > $targetMib || $days > $targetDays) {
+                    if ($mib > $targetMib) {
                         continue;
                     }
 
@@ -350,9 +356,29 @@ class VirtualEsimPlanResolver
             }
 
             $states = $next;
-            $targetKey = $targetMib . ':' . $targetDays;
-            if (isset($states[$targetKey])) {
-                return $states[$targetKey]['items'];
+
+            // Because count increases monotonically, the first count with a valid state
+            // is the minimum number of provider writes. Among those, choose the least
+            // validity over-delivery and then the lowest provider TOPUP cost.
+            $matches = array_values(array_filter(
+                $states,
+                static fn (array $state): bool => count($state['items']) === $count
+                    && (int) $state['mib'] === $targetMib
+                    && (int) $state['days'] >= $minimumAdditionalDays,
+            ));
+
+            if ($matches !== []) {
+                usort($matches, static function (array $left, array $right) use ($minimumAdditionalDays): int {
+                    $leftOver = (int) $left['days'] - $minimumAdditionalDays;
+                    $rightOver = (int) $right['days'] - $minimumAdditionalDays;
+                    if ($leftOver !== $rightOver) {
+                        return $leftOver <=> $rightOver;
+                    }
+
+                    return (int) $left['cost'] <=> (int) $right['cost'];
+                });
+
+                return $matches[0]['items'];
             }
         }
 
@@ -372,8 +398,8 @@ class VirtualEsimPlanResolver
             $topupPriceRaw += (int) ($topup['provider_price_raw'] ?? 0);
         }
 
-        if (! $this->sameData($deliveredBytes, $targetDataBytes) || $deliveredDays !== $targetDurationDays) {
-            throw new RuntimeException('Internal virtual-plan resolver produced a non-exact recipe.', 500);
+        if (! $this->sameData($deliveredBytes, $targetDataBytes) || $deliveredDays < $targetDurationDays) {
+            throw new RuntimeException('Internal virtual-plan resolver produced invalid data or insufficient validity.', 500);
         }
 
         return [
@@ -385,6 +411,7 @@ class VirtualEsimPlanResolver
             'included_topup_count' => count($topups),
             'delivered_data_bytes' => $deliveredBytes,
             'delivered_duration_days' => $deliveredDays,
+            'validity_overdelivery_days' => max(0, $deliveredDays - $targetDurationDays),
             'topup_provider_price_raw_total' => $topupPriceRaw,
         ];
     }

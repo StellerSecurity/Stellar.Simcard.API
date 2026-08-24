@@ -108,7 +108,48 @@ it('supports mixed topup packages and remains generic across virtual sizes', fun
         ->and($recipe['delivered_duration_days'])->toBe(30);
 });
 
-it('fails closed when no exact composition exists and never accepts a larger base', function (): void {
+
+it('resolves Denmark 12GB 30-day using exact data even when included topups extend validity', function (): void {
+    /** @var EsimProvider&MockInterface $provider */
+    $provider = Mockery::mock(EsimProvider::class);
+    $provider->shouldReceive('listPlans')
+        ->once()
+        ->with([
+            'type' => 'TOPUP',
+            'packageCode' => 'DK_10_30',
+        ], 'primary')
+        ->andReturn([
+            'success' => true,
+            'obj' => [
+                'packageList' => [[
+                    'packageCode' => 'TOPUP_DK_1_7',
+                    'slug' => 'DK_1_7_TOPUP',
+                    'name' => 'Denmark 1GB 7Days',
+                    'price' => 5700,
+                    'currencyCode' => 'USD',
+                    'volume' => gib(1),
+                    'duration' => 7,
+                    'durationUnit' => 'DAY',
+                    'dataType' => 1,
+                ]],
+            ],
+        ]);
+
+    $resolver = new VirtualEsimPlanResolver($provider);
+    $recipe = $resolver->resolve([[
+        'package_code' => 'DK_10_30',
+        'data_bytes' => gib(10),
+        'duration_days' => 30,
+    ]], gib(12), 30);
+
+    expect($recipe['base']['package_code'])->toBe('DK_10_30')
+        ->and($recipe['topups'])->toHaveCount(2)
+        ->and($recipe['delivered_data_bytes'])->toBe(gib(12))
+        ->and($recipe['delivered_duration_days'])->toBe(44)
+        ->and($recipe['validity_overdelivery_days'])->toBe(14);
+});
+
+it('fails closed when no exact-data composition exists and never accepts a larger-data base', function (): void {
     /** @var EsimProvider&MockInterface $provider */
     $provider = Mockery::mock(EsimProvider::class);
     $provider->shouldNotReceive('listPlans');
