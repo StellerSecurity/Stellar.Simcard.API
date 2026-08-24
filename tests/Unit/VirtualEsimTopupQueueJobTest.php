@@ -8,8 +8,6 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 uses(Tests\TestCase::class);
 
 it('uses an encrypted unique async job for each virtual topup step', function (): void {
-    config()->set('esim.virtual_fulfillment.queue', 'default');
-
     $job = new FulfillVirtualEsimTopupStepJob(
         '00000000-0000-4000-8000-000000000010',
         '1234567890123456',
@@ -21,7 +19,8 @@ it('uses an encrypted unique async job for each virtual topup step', function ()
     expect($job)->toBeInstanceOf(ShouldQueue::class)
         ->and($job)->toBeInstanceOf(ShouldBeEncrypted::class)
         ->and($job)->toBeInstanceOf(ShouldBeUnique::class)
-        ->and($job->queue)->toBe('default')
+        ->and($job->connection)->toBe('database')
+        ->and($job->queue)->toBe('virtual-esim-topups')
         ->and($job->uniqueId())->toBe('virtual-esim-topup:00000000-0000-4000-8000-000000000010:step:1')
         ->and($job->timeout)->toBeLessThan(90);
 });

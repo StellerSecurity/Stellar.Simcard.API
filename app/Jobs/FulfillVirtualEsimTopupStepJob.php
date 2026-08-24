@@ -34,8 +34,11 @@ class FulfillVirtualEsimTopupStepJob implements ShouldQueue, ShouldBeEncrypted, 
         public readonly ?string $commerceOrderId = null,
         public readonly ?string $commerceOrderItemId = null,
     ) {
-        $queue = trim((string) config('esim.virtual_fulfillment.queue', 'default'));
-        $this->onQueue($queue !== '' ? $queue : 'default');
+        $connection = trim((string) config('esim.virtual_fulfillment.connection', 'database'));
+        $queue = trim((string) config('esim.virtual_fulfillment.queue', 'virtual-esim-topups'));
+
+        $this->onConnection($connection !== '' ? $connection : 'database');
+        $this->onQueue($queue !== '' ? $queue : 'virtual-esim-topups');
     }
 
     public function uniqueId(): string

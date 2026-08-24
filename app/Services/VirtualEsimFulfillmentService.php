@@ -349,12 +349,12 @@ class VirtualEsimFulfillmentService
 
     private function assertAsyncQueueConfigured(): void
     {
-        $connection = trim((string) config('queue.default', ''));
+        $connection = trim((string) config('esim.virtual_fulfillment.connection', 'database'));
         $driver = strtolower(trim((string) config('queue.connections.' . $connection . '.driver', '')));
 
         if (! in_array($driver, ['database', 'redis', 'sqs', 'beanstalkd', 'failover'], true)) {
             throw new RuntimeException(
-                'Virtual eSIM included top-ups require an asynchronous persistent queue connection.',
+                'Virtual eSIM included top-ups require a dedicated asynchronous persistent queue connection.',
                 503,
             );
         }

@@ -23,9 +23,10 @@ return [
     ],
 
     'virtual_fulfillment' => [
-        // Included virtual-plan top-ups always run asynchronously. Keep this on a
-        // queue consumed by a persistent worker; 'default' preserves existing workers.
-        'queue' => env('ESIM_VIRTUAL_TOPUP_QUEUE', 'default'),
+        // Keep the application's global QUEUE_CONNECTION unchanged. Virtual-plan
+        // included top-ups are isolated onto their own persistent connection/queue.
+        'connection' => 'database',
+        'queue' => 'virtual-esim-topups',
     ],
 
     'esimaccess' => [
