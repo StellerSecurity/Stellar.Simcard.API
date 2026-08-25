@@ -6,7 +6,17 @@ interface EsimProvider
 {
     public function listPlans(array $filters = [], string $account = 'primary'): array;
 
-    public function createOrder(string $packageCode, string $account = 'primary'): EsimProviderOrder;
+    /**
+     * Create one provider eSIM order.
+     *
+     * $periodNum is only used for provider Daily/Unlimited (dataType=2) plans.
+     * Leaving it null preserves the existing fixed-data order contract exactly.
+     */
+    public function createOrder(
+        string $packageCode,
+        string $account = 'primary',
+        ?int $periodNum = null
+    ): EsimProviderOrder;
 
     public function queryOrder(string $externalOrderId, string $account = 'primary'): array;
 

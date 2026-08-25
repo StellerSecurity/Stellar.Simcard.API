@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Exceptions\SimcardOwnershipConflictException;
+use App\Exceptions\SimcardOrderConflictException;
 use App\Models\Simcard;
 use App\Services\Esim\EsimCryptoService;
 use App\Services\Esim\EsimMarketingRefundOfferService;
@@ -57,7 +58,8 @@ class SimcardService
         ?string $commerceOrderItemId = null,
         ?int $commerceUnit = null,
         ?string $idempotencyKey = null,
-        ?array $virtualFulfillmentRecipe = null
+        ?array $virtualFulfillmentRecipe = null,
+        ?int $periodNum = null
     ): Simcard {
 
         $planId = preg_replace('/\s+/', '', (string) $planId);
@@ -67,6 +69,10 @@ class SimcardService
         $commerceUnit = $commerceUnit !== null && $commerceUnit > 0 ? $commerceUnit : null;
         $idempotencyKey = $this->normalizeNullableIdentifier($idempotencyKey);
 
+        if ($periodNum !== null && ($periodNum < 1 || $periodNum > 365)) {
+            throw new RuntimeException('Daily/Unlimited eSIM duration must be between 1 and 365 days.', 422);
+        }
+
         // Deploy-safe isolation: normal eSIM orders must not depend on the virtual
         // recipe migration. A virtual order fails before provider spend until its
         // durable recipe column exists, while normal /sim/order remains untouched.
@@ -74,7 +80,13 @@ class SimcardService
             throw new RuntimeException('Virtual-plan fulfillment storage is not migrated yet.', 503);
         }
 
-        return DB::transaction(function () use ($planIdHash, $userId, $accountRef, $packageCode, $planId, $email, $emailSource, $commerceOrderId, $commerceOrderItemId, $commerceUnit, $idempotencyKey, $virtualFulfillmentRecipe) {
+        // Never spend provider balance for a dynamic-duration order unless its
+        // selected period can be persisted for safe idempotent retries.
+        if ($periodNum !== null && ! Schema::hasColumn('simcards', 'provider_period_num')) {
+            throw new RuntimeException('Daily/Unlimited eSIM duration storage is not migrated yet.', 503);
+        }
+
+        return DB::transaction(function () use ($planIdHash, $userId, $accountRef, $packageCode, $planId, $email, $emailSource, $commerceOrderId, $commerceOrderItemId, $commerceUnit, $idempotencyKey, $virtualFulfillmentRecipe, $periodNum) {
             // If Commerce retries the same paid order item, do not create a second provider order.
             $existing = $this->findExistingSimcardForOrderRequest(
                 planIdHash: $planIdHash,
@@ -85,6 +97,19 @@ class SimcardService
             );
 
             if ($existing) {
+                if (Schema::hasColumn('simcards', 'provider_period_num')) {
+                    $existingPeriodNum = $existing->provider_period_num !== null
+                        ? (int) $existing->provider_period_num
+                        : null;
+
+                    if ($existingPeriodNum !== $periodNum) {
+                        throw new SimcardOrderConflictException(
+                            'Existing eSIM duration does not match the requested Daily/Unlimited duration.',
+                            409,
+                        );
+                    }
+                }
+
                 if ($virtualFulfillmentRecipe !== null) {
                     if (! hash_equals((string) $existing->package_code, $packageCode)) {
                         throw new \RuntimeException(
@@ -106,7 +131,7 @@ class SimcardService
                 return $existing;
             }
 
-            $order = $this->provider->createOrder($packageCode, 'primary');
+            $order = $this->provider->createOrder($packageCode, 'primary', $periodNum);
 
             $externalOrderIdEnc = $this->crypto->encryptForPlan(
                 $planId,
@@ -135,6 +160,13 @@ class SimcardService
                 'purchased_on'           => now(),
             ];
 
+            // Keep fixed-plan deploys independent from the new migration. The
+            // column is only required for a Daily/Unlimited order, which is
+            // rejected above before provider spend if the migration is missing.
+            if (Schema::hasColumn('simcards', 'provider_period_num')) {
+                $attributes['provider_period_num'] = $periodNum;
+            }
+
             if ($virtualFulfillmentRecipe !== null) {
                 $attributes['virtual_fulfillment_recipe'] = $virtualFulfillmentRecipe;
             }
@@ -159,7 +191,8 @@ class SimcardService
         ?string $commerceOrderItemId = null,
         ?int $commerceUnit = null,
         ?string $idempotencyKey = null,
-        ?array $virtualFulfillmentRecipe = null
+        ?array $virtualFulfillmentRecipe = null,
+        ?int $periodNum = null
     ): array {
         $simcard = $this->orderEsim(
             userId: $userId,
@@ -173,6 +206,7 @@ class SimcardService
             commerceUnit: $commerceUnit,
             idempotencyKey: $idempotencyKey,
             virtualFulfillmentRecipe: $virtualFulfillmentRecipe,
+            periodNum: $periodNum,
         );
 
         $install = $this->fetchInstallInfoWithRetry($planId);
@@ -517,6 +551,10 @@ class SimcardService
             'state' => $simcard->state,
             'provider' => $simcard->provider,
             'package_code' => $simcard->package_code,
+            'plan_type' => $simcard->provider_period_num !== null ? 'unlimited' : 'fixed',
+            'duration_days' => $simcard->provider_period_num !== null
+                ? (int) $simcard->provider_period_num
+                : null,
             'iccid_last4' => $simcard->iccid_last4,
             'esim_status' => $simcard->esim_status,
             'smdp_status' => $simcard->smdp_status,

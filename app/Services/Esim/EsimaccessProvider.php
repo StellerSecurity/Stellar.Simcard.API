@@ -83,6 +83,17 @@ class EsimaccessProvider implements EsimProvider
             'iccid' => $filters['iccid'] ?? '',
         ];
 
+        // Additive filters used by Daily/Unlimited catalogue consumers. Do not add
+        // these keys to legacy requests unless explicitly supplied, so the signed
+        // fixed-plan request body remains unchanged.
+        if (array_key_exists('slug', $filters)) {
+            $payload['slug'] = $filters['slug'] ?? '';
+        }
+
+        if (array_key_exists('dataType', $filters)) {
+            $payload['dataType'] = $filters['dataType'] ?? '';
+        }
+
         return $this->http()
             ->withHeaders($this->createHeaders($payload, $account))
             ->post($this->baseUrl . '/v1/open/package/list', $payload)
@@ -90,14 +101,30 @@ class EsimaccessProvider implements EsimProvider
             ->json();
     }
 
-    public function createOrder(string $packageCode, string $account = self::ACCOUNT_PRIMARY): EsimProviderOrder
+    public function createOrder(
+        string $packageCode,
+        string $account = self::ACCOUNT_PRIMARY,
+        ?int $periodNum = null
+    ): EsimProviderOrder
     {
+        if ($periodNum !== null && ($periodNum < 1 || $periodNum > 365)) {
+            throw new RuntimeException('Daily/Unlimited eSIM duration must be between 1 and 365 days.');
+        }
+
+        $packageInfo = [
+            'packageCode' => $packageCode,
+            'count' => 1,
+        ];
+
+        // eSIMAccess calls this periodNum. It is required for dataType=2
+        // Daily/Unlimited plans and must be omitted for the existing fixed plans.
+        if ($periodNum !== null) {
+            $packageInfo['periodNum'] = $periodNum;
+        }
+
         $payload = [
             'transactionId' => Str::random(16),
-            'packageInfoList' => [[
-                'packageCode' => $packageCode,
-                'count' => 1,
-            ]],
+            'packageInfoList' => [$packageInfo],
         ];
 
         $body = $this->http()

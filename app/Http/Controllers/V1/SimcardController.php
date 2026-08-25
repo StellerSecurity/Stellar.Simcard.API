@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\V1;
 
 use App\Exceptions\SimcardOwnershipConflictException;
+use App\Exceptions\SimcardOrderConflictException;
 use App\Http\Controllers\Controller;
 use App\Services\SimcardService;
 use App\Services\EsimAutoTopupService;
@@ -37,7 +38,7 @@ class SimcardController extends Controller
 
     public function plans(Request $request): JsonResponse
     {
-        $filters = $request->only(['locationCode', 'type', 'packageCode', 'iccid']);
+        $filters = $request->only(['locationCode', 'type', 'packageCode', 'iccid', 'slug', 'dataType']);
         $plans = $this->simcardService->listPlans($filters);
 
         return response()->json([
@@ -62,6 +63,9 @@ class SimcardController extends Controller
             'commerce_order_item_id' => ['nullable', 'string', 'max:64'],
             'commerce_unit' => ['nullable', 'integer', 'min:1', 'max:99'],
             'idempotency_key' => ['nullable', 'string', 'max:128'],
+            // Optional and additive. eSIMAccess Daily/Unlimited plans (dataType=2)
+            // use periodNum to select the purchased validity in days.
+            'days' => ['nullable', 'integer', 'min:1', 'max:365'],
             // Auto Top-Up is optional and must never alter normal eSIM ordering.
             // Its nested values are normalized after the provider order succeeds.
             'auto_topup' => ['nullable', 'array'],
@@ -85,9 +89,15 @@ class SimcardController extends Controller
                 commerceOrderItemId: $data['commerce_order_item_id'] ?? null,
                 commerceUnit: isset($data['commerce_unit']) ? (int) $data['commerce_unit'] : null,
                 idempotencyKey: $data['idempotency_key'] ?? null,
+                periodNum: isset($data['days']) ? (int) $data['days'] : null,
             );
         } catch (SimcardOwnershipConflictException $exception) {
             return $this->ownershipConflict($exception->getMessage());
+        } catch (SimcardOrderConflictException $exception) {
+            return response()->json([
+                'response_code' => 409,
+                'response_message' => $exception->getMessage(),
+            ], 409);
         }
 
         $autoTopupConfigured = false;
@@ -116,6 +126,10 @@ class SimcardController extends Controller
                     'state' => $result['simcard']->state,
                     'provider' => $result['simcard']->provider,
                     'package_code' => $result['simcard']->package_code,
+                    'plan_type' => $result['simcard']->provider_period_num !== null ? 'unlimited' : 'fixed',
+                    'duration_days' => $result['simcard']->provider_period_num !== null
+                        ? (int) $result['simcard']->provider_period_num
+                        : null,
                     // Boolean only: confirms ownership was linked without
                     // exposing the raw user ID or privacy-preserving user_ref.
                     'account_linked' => $result['simcard']->user_ref !== null,
@@ -329,6 +343,10 @@ class SimcardController extends Controller
                     'state' => $result['simcard']->state,
                     'provider' => $result['simcard']->provider,
                     'package_code' => $result['simcard']->package_code,
+                    'plan_type' => $result['simcard']->provider_period_num !== null ? 'unlimited' : 'fixed',
+                    'duration_days' => $result['simcard']->provider_period_num !== null
+                        ? (int) $result['simcard']->provider_period_num
+                        : null,
                 ],
                 'provider' => $result['provider'],
                 'install' => $result['install'] ?? [],
