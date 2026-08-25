@@ -4,6 +4,7 @@ use App\Services\Esim\EsimMarketingRefundOfferService;
 use App\Services\Esim\WholesaleWebhookRelayService;
 use App\Services\EsimAutoTopupService;
 use App\Services\EsimDataUsageAlertService;
+use App\Services\VirtualEsimQuotaService;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Schedule;
@@ -102,6 +103,32 @@ Schedule::command('esim:process-data-usage-alerts')
     ->everyFifteenMinutes()
     ->withoutOverlapping();
 
+
+
+Artisan::command('esim:process-virtual-quota-caps {--limit=100} {--simcard=} {--force : Ignore the normal quota polling interval}', function () {
+    $summary = app(VirtualEsimQuotaService::class)->processPending(
+        (int) $this->option('limit'),
+        $this->option('simcard') !== null ? (string) $this->option('simcard') : null,
+        (bool) $this->option('force'),
+    );
+
+    $this->info(sprintf(
+        'Processed: %d, refreshed: %d, monitoring: %d, suspend queued: %d, suspended: %d, skipped: %d, failed: %d',
+        $summary['processed'],
+        $summary['refreshed'],
+        $summary['monitoring'],
+        $summary['suspend_queued'],
+        $summary['suspended'],
+        $summary['skipped'],
+        $summary['failed'],
+    ));
+
+    return $summary['failed'] > 0 ? 1 : 0;
+})->purpose('Refresh usage and enforce Stellar quotas for virtual eSIM fallback plans');
+
+Schedule::command('esim:process-virtual-quota-caps --limit=100')
+    ->everyFiveMinutes()
+    ->withoutOverlapping();
 
 Artisan::command('esim:retry-wholesale-webhook-relays {--limit=100}', function () {
     $summary = app(WholesaleWebhookRelayService::class)->retryPending((int) $this->option('limit'));

@@ -5,6 +5,7 @@ use App\Services\Esim\EsimMarketingRefundOfferService;
 use App\Services\Esim\EsimProvider;
 use App\Services\Esim\SimcardUserReferenceService;
 use App\Services\SimcardService;
+use App\Services\VirtualEsimQuotaService;
 use Mockery\MockInterface;
 
 it('normalizes provider installation credentials', function (): void {
@@ -20,6 +21,7 @@ it('normalizes provider installation credentials', function (): void {
         $crypto,
         $marketing,
         new SimcardUserReferenceService(),
+        Mockery::mock(VirtualEsimQuotaService::class),
     );
 
     $method = new ReflectionMethod($service, 'buildInstallPayload');
@@ -49,6 +51,7 @@ it('rejects non https install urls and malformed activation codes', function ():
         Mockery::mock(EsimCryptoService::class),
         Mockery::mock(EsimMarketingRefundOfferService::class),
         new SimcardUserReferenceService(),
+        Mockery::mock(VirtualEsimQuotaService::class),
     );
 
     $method = new ReflectionMethod($service, 'buildInstallPayload');

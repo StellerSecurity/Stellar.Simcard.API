@@ -40,6 +40,7 @@ class EsimAutoTopupService
         private readonly TopupService $topupService,
         private readonly EsimCryptoService $crypto,
         private readonly EsimProvider $provider,
+        private readonly VirtualEsimQuotaService $virtualQuotaService,
     ) {}
 
     /**
@@ -209,9 +210,7 @@ class EsimAutoTopupService
             return ['status' => 'disabled'];
         }
 
-        $totalBytes = $this->positiveInt($simcard->total_volume);
-        $remainingBytes = $this->nonNegativeInt($simcard->remaining_volume);
-        $orderUsage = $this->nonNegativeInt($simcard->order_usage);
+        [$totalBytes, $remainingBytes, $orderUsage] = $this->virtualQuotaService->effectiveUsageTuple($simcard);
 
         if ($totalBytes === null || $remainingBytes === null || $totalBytes <= 0) {
             return ['status' => 'skipped', 'reason' => 'usage_not_ready'];
@@ -714,9 +713,7 @@ class EsimAutoTopupService
                 return [null, null];
             }
 
-            $totalBytes = $this->positiveInt($simcard->total_volume);
-            $remainingBytes = $this->nonNegativeInt($simcard->remaining_volume);
-            $orderUsage = $this->nonNegativeInt($simcard->order_usage);
+            [$totalBytes, $remainingBytes, $orderUsage] = $this->virtualQuotaService->effectiveUsageTuple($simcard);
             if ($totalBytes === null || $remainingBytes === null || $totalBytes <= 0) {
                 return [null, null];
             }

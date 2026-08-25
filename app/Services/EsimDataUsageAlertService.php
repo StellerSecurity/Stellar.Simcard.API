@@ -35,6 +35,7 @@ class EsimDataUsageAlertService
         private readonly EsimCryptoService $crypto,
         private readonly EsimProvider $provider,
         private readonly SimcardActionLinkService $actionLinks,
+        private readonly VirtualEsimQuotaService $virtualQuotaService,
     ) {}
 
     /**
@@ -340,16 +341,33 @@ class EsimDataUsageAlertService
                 return ['status' => 'skipped', 'reason' => 'provider_usage_not_ready'];
             }
 
-            $remainingPercent = max(0.0, min(100.0, ($remainingBytes / $totalBytes) * 100));
+            // Preserve raw provider counters in simcards, but calculate customer-facing
+            // alerts from the advertised virtual entitlement when quota fallback is used.
+            $freshSimcard = Simcard::query()->whereKey($simcard->id)->first() ?? $simcard;
+            $effective = $this->virtualQuotaService->effectiveUsage(
+                $freshSimcard,
+                $totalBytes,
+                $orderUsage,
+                $remainingBytes,
+            );
+            $effectiveTotalBytes = $effective['total_bytes'];
+            $effectiveUsedBytes = $effective['used_bytes'];
+            $effectiveRemainingBytes = $effective['remaining_bytes'];
+
+            if ($effectiveTotalBytes === null || $effectiveRemainingBytes === null || $effectiveTotalBytes <= 0) {
+                return ['status' => 'skipped', 'reason' => 'provider_usage_not_ready'];
+            }
+
+            $remainingPercent = max(0.0, min(100.0, ($effectiveRemainingBytes / $effectiveTotalBytes) * 100));
 
             return [
                 'status' => 'refreshed',
                 'iccid' => $iccid,
                 'provider_account' => $account,
                 'package_label' => $this->extractPackageLabel($providerSim),
-                'total_bytes' => $totalBytes,
-                'order_usage' => $orderUsage,
-                'remaining_bytes' => $remainingBytes,
+                'total_bytes' => $effectiveTotalBytes,
+                'order_usage' => $effectiveUsedBytes,
+                'remaining_bytes' => $effectiveRemainingBytes,
                 'remaining_percent' => round($remainingPercent, 2),
             ];
         } catch (Throwable $exception) {

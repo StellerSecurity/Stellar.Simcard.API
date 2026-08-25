@@ -48,8 +48,9 @@ class VirtualEsimFulfillmentService
         if ($storedRecipe !== null) {
             $recipe = $this->validateLockedRecipe($storedRecipe, $targetDataBytes, $targetDurationDays);
         } else {
-            // Resolve BEFORE spending provider balance. There is deliberately no
-            // next-larger-package fallback anywhere in this flow.
+            // Resolve BEFORE spending provider balance. Exact BASE+TOPUP composition
+            // is preferred; otherwise the resolver may select a larger BASE protected
+            // by Stellar's virtual usage quota.
             $recipe = $this->resolver->resolve(
                 candidates: $candidates,
                 targetDataBytes: $targetDataBytes,
@@ -106,9 +107,27 @@ class VirtualEsimFulfillmentService
 
         if ($recipeTopups === []) {
             $recipe['fulfilled_topups'] = [];
-            $recipe['status'] = 'FULFILLED';
             $recipe['customer_charge_for_included_topups'] = false;
-            $recipe['fulfilled_at'] = $recipe['fulfilled_at'] ?? now()->toIso8601String();
+
+            if (($recipe['strategy'] ?? '') === 'quota_capped_provider_plan_v1') {
+                $quota = is_array($recipe['quota'] ?? null) ? $recipe['quota'] : [];
+                $quota['entitlement_bytes'] = (int) ($quota['entitlement_bytes'] ?? $targetDataBytes);
+                $quota['provider_allowance_bytes'] = (int) ($quota['provider_allowance_bytes'] ?? data_get($recipe, 'base.data_bytes', 0));
+                $quota['customer_visible_total_bytes'] = (int) $quota['entitlement_bytes'];
+                $quota['state'] = strtoupper(trim((string) ($quota['state'] ?? 'MONITORING'))) ?: 'MONITORING';
+                $quota['paid_topup_session_ids'] = is_array($quota['paid_topup_session_ids'] ?? null)
+                    ? array_values($quota['paid_topup_session_ids'])
+                    : [];
+                $recipe['quota'] = $quota;
+                $recipe['status'] = in_array($quota['state'], ['SUSPENDED', 'SUSPEND_QUEUED', 'SUSPENDING'], true)
+                    ? 'QUOTA_' . $quota['state']
+                    : 'QUOTA_MONITORING';
+                $recipe['base_provisioned_at'] = $recipe['base_provisioned_at'] ?? now()->toIso8601String();
+            } else {
+                $recipe['status'] = 'FULFILLED';
+                $recipe['fulfilled_at'] = $recipe['fulfilled_at'] ?? now()->toIso8601String();
+            }
+
             $this->persistRecipe($simcard, $recipe);
         } else {
             $status = strtoupper(trim((string) ($recipe['status'] ?? '')));
@@ -363,6 +382,7 @@ class VirtualEsimFulfillmentService
     /** @return array<string,mixed> */
     private function validateLockedRecipe(array $recipe, int $targetDataBytes, int $targetDurationDays): array
     {
+        $strategy = trim((string) ($recipe['strategy'] ?? ''));
         $basePackageCode = trim((string) data_get($recipe, 'base.package_code', ''));
         $deliveredBytes = data_get($recipe, 'delivered_data_bytes');
         $deliveredDays = data_get($recipe, 'delivered_duration_days');
@@ -370,10 +390,8 @@ class VirtualEsimFulfillmentService
         $recipeTargetDays = data_get($recipe, 'target_duration_days');
         $topups = data_get($recipe, 'topups', []);
 
-        if (
-            $basePackageCode === ''
+        $commonInvalid = $basePackageCode === ''
             || ! is_numeric($deliveredBytes)
-            || abs((int) $deliveredBytes - $targetDataBytes) > 1048576
             || ! is_numeric($deliveredDays)
             || (int) $deliveredDays < $targetDurationDays
             || ! is_numeric($recipeTargetBytes)
@@ -381,11 +399,39 @@ class VirtualEsimFulfillmentService
             || ! is_numeric($recipeTargetDays)
             || (int) $recipeTargetDays !== $targetDurationDays
             || ! is_array($topups)
-            || count($topups) > 10
-        ) {
-            throw new RuntimeException('Stored virtual-plan fulfillment recipe does not match the advertised data or minimum validity.', 409);
+            || count($topups) > 10;
+
+        if ($commonInvalid) {
+            throw new RuntimeException('Stored virtual-plan fulfillment recipe does not match the advertised target or minimum validity.', 409);
         }
 
-        return $recipe;
+        if ($strategy === 'base_plus_included_topups_v1') {
+            if (abs((int) $deliveredBytes - $targetDataBytes) > 1048576) {
+                throw new RuntimeException('Stored exact virtual-plan recipe over- or under-delivers data.', 409);
+            }
+
+            return $recipe;
+        }
+
+        if ($strategy === 'quota_capped_provider_plan_v1') {
+            $quotaBytes = data_get($recipe, 'quota.entitlement_bytes');
+            $providerBytes = data_get($recipe, 'quota.provider_allowance_bytes');
+
+            if (
+                $topups !== []
+                || ! is_numeric($quotaBytes)
+                || abs((int) $quotaBytes - $targetDataBytes) > 1048576
+                || ! is_numeric($providerBytes)
+                || (int) $providerBytes <= $targetDataBytes
+                || (int) $deliveredBytes <= $targetDataBytes
+            ) {
+                throw new RuntimeException('Stored quota-capped virtual-plan recipe is invalid.', 409);
+            }
+
+            return $recipe;
+        }
+
+        throw new RuntimeException('Stored virtual-plan fulfillment recipe uses an unsupported strategy.', 409);
     }
+
 }

@@ -28,6 +28,7 @@ class TopupService
         private readonly EsimCryptoService $crypto,
         private readonly EsimProvider $provider,
         private readonly SimcardActionLinkService $actionLinks,
+        private readonly VirtualEsimQuotaService $virtualQuotaService,
     ) {}
 
 
@@ -482,9 +483,17 @@ class TopupService
             throw new RuntimeException('Top-up eSIM could not be found.', 404);
         }
 
+        $restoredQuotaProfileForPaidTopup = false;
+
         if ($this->isIncludedVirtualTopupSession($session)) {
             $this->assertIncludedVirtualTopupEligible($simcard);
         } else {
+            if ($this->virtualQuotaService->allowsPaidTopupWhileSuspended($simcard)) {
+                $this->virtualQuotaService->restoreForPaidTopup($simcard);
+                $restoredQuotaProfileForPaidTopup = true;
+                $simcard->refresh();
+            }
+
             $this->assertTopupEligible($simcard);
         }
 
@@ -582,12 +591,34 @@ class TopupService
             ], static fn ($value) => $value !== null && $value !== ''));
             $session->save();
 
+            if (! $this->isIncludedVirtualTopupSession($session)) {
+                $this->virtualQuotaService->extendEntitlementForPaidTopup($simcard->fresh() ?? $simcard, $session);
+            }
+
             return [
                 'status' => self::STATUS_FULFILLED,
                 'topup_session_id' => $session->id,
                 'supplier_reference' => $supplierReference,
             ];
         } catch (Throwable $exception) {
+            // If a quota-capped profile had to be unsuspended so a customer-paid
+            // provider top-up could be attempted, never leave the old exhausted
+            // entitlement open after a failed/ambiguous top-up write. Re-evaluate
+            // the stored usage immediately; this queues the dedicated quota suspend
+            // job again when the previous entitlement is still exhausted. A later
+            // idempotent top-up retry can extend entitlement and restore the profile.
+            if ($restoredQuotaProfileForPaidTopup) {
+                try {
+                    $this->virtualQuotaService->processStoredUsage((string) $simcard->id);
+                } catch (Throwable $quotaException) {
+                    Log::warning('Quota-capped eSIM could not be re-queued for suspension after paid top-up failure.', [
+                        'simcard_id' => (string) $simcard->id,
+                        'topup_session_id' => (string) $session->id,
+                        'exception' => basename(str_replace('\\', '/', get_class($quotaException))),
+                    ]);
+                }
+            }
+
             $session->commerce_order_id = $commerceOrderId ?: $session->commerce_order_id;
             $session->commerce_order_item_id = $commerceOrderItemId ?: $session->commerce_order_item_id;
 
@@ -1244,6 +1275,10 @@ class TopupService
             ? $providerStatus === 'IN_USE'
             : $fallbackState === 'active';
 
+        if (! $eligible && $this->virtualQuotaService->allowsPaidTopupWhileSuspended($simcard)) {
+            $eligible = true;
+        }
+
         if (! $eligible) {
             throw new RuntimeException(
                 'Only eSIMs currently in use can be topped up. Install and activate this eSIM first.',
@@ -1278,6 +1313,13 @@ class TopupService
             ? (int) $simcard->total_volume
             : (int) ($currentPlan['data_bytes'] ?? 0);
 
+        $effectiveUsage = $this->virtualQuotaService->effectiveUsage(
+            $simcard,
+            $totalBytes ?: (is_numeric($simcard->total_volume) ? (int) $simcard->total_volume : null),
+            is_numeric($simcard->order_usage) ? (int) $simcard->order_usage : null,
+            is_numeric($simcard->remaining_volume) ? (int) $simcard->remaining_volume : null,
+        );
+
         $payload = [
             'id' => $simcard->id,
             'label' => 'Stellar eSIM',
@@ -1289,12 +1331,12 @@ class TopupService
             'data_status' => $simcard->data_status,
             'validity_status' => $simcard->validity_status,
             'iccid_last4' => $simcard->iccid_last4,
-            'remaining_bytes' => $simcard->remaining_volume,
-            'remaining_data' => $this->formatBytes($simcard->remaining_volume),
-            'total_bytes' => $totalBytes ?: $simcard->total_volume,
-            'total_data' => $this->formatBytes($totalBytes ?: $simcard->total_volume),
-            'used_bytes' => $simcard->order_usage,
-            'used_data' => $this->formatBytes($simcard->order_usage),
+            'remaining_bytes' => $effectiveUsage['remaining_bytes'],
+            'remaining_data' => $this->formatBytes($effectiveUsage['remaining_bytes']),
+            'total_bytes' => $effectiveUsage['total_bytes'],
+            'total_data' => $this->formatBytes($effectiveUsage['total_bytes']),
+            'used_bytes' => $effectiveUsage['used_bytes'],
+            'used_data' => $this->formatBytes($effectiveUsage['used_bytes']),
             'remaining_validity_days' => $simcard->remaining_validity,
             'expires_at' => optional($simcard->expires_at)->toISOString(),
             'activated_at' => optional($simcard->activated_at)->toISOString(),

@@ -149,19 +149,70 @@ it('resolves Denmark 12GB 30-day using exact data even when included topups exte
         ->and($recipe['validity_overdelivery_days'])->toBe(14);
 });
 
-it('fails closed when no exact-data composition exists and never accepts a larger-data base', function (): void {
+it('falls back to the smallest larger provider base when exact-data composition is impossible', function (): void {
     /** @var EsimProvider&MockInterface $provider */
     $provider = Mockery::mock(EsimProvider::class);
-    $provider->shouldNotReceive('listPlans');
+    $provider->shouldReceive('listPlans')
+        ->once()
+        ->with([
+            'type' => 'TOPUP',
+            'packageCode' => 'TR_1_7',
+        ], 'primary')
+        ->andReturn([
+            'success' => true,
+            'obj' => ['packageList' => [[
+                'packageCode' => 'TOPUP_TR_1_7',
+                'slug' => 'TR_1_7_TOPUP',
+                'volume' => gib(1),
+                'duration' => 7,
+                'durationUnit' => 'DAY',
+                'dataType' => 1,
+            ]]],
+        ]);
+
+    $resolver = new VirtualEsimPlanResolver($provider);
+    $recipe = $resolver->resolve([
+        [
+            'package_code' => 'TR_1_7',
+            'data_bytes' => gib(1),
+            'duration_days' => 7,
+        ],
+        [
+            'package_code' => 'TR_3_30',
+            'data_bytes' => gib(3),
+            'duration_days' => 30,
+        ],
+        [
+            'package_code' => 'TR_5_30',
+            'data_bytes' => gib(5),
+            'duration_days' => 30,
+        ],
+    ], gib(2), 30);
+
+    expect($recipe['strategy'])->toBe('quota_capped_provider_plan_v1')
+        ->and($recipe['base']['package_code'])->toBe('TR_3_30')
+        ->and($recipe['topups'])->toBe([])
+        ->and($recipe['target_data_bytes'])->toBe(gib(2))
+        ->and($recipe['delivered_data_bytes'])->toBe(gib(3))
+        ->and($recipe['quota']['entitlement_bytes'])->toBe(gib(2))
+        ->and($recipe['quota']['provider_allowance_bytes'])->toBe(gib(3));
+});
+
+it('still fails closed when neither exact composition nor a larger valid base exists', function (): void {
+    /** @var EsimProvider&MockInterface $provider */
+    $provider = Mockery::mock(EsimProvider::class);
+    $provider->shouldReceive('listPlans')
+        ->once()
+        ->andReturn(['success' => true, 'obj' => ['packageList' => []]]);
 
     $resolver = new VirtualEsimPlanResolver($provider);
 
     expect(fn () => $resolver->resolve([[
-        'package_code' => 'OLD_NEXT_LARGER_10GB',
-        'data_bytes' => gib(10),
-        'duration_days' => 30,
-    ]], gib(6), 30))->toThrow(
+        'package_code' => 'ONLY_1GB_7D',
+        'data_bytes' => gib(1),
+        'duration_days' => 7,
+    ]], gib(2), 30))->toThrow(
         RuntimeException::class,
-        'Virtual plan has no eligible real provider base packages.',
+        'No provider composition or quota-capped larger BASE exists',
     );
 });

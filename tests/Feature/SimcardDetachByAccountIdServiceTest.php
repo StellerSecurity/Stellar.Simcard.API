@@ -7,6 +7,7 @@ use App\Services\Esim\EsimMarketingRefundOfferService;
 use App\Services\Esim\EsimProvider;
 use App\Services\Esim\SimcardUserReferenceService;
 use App\Services\SimcardService;
+use App\Services\VirtualEsimQuotaService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
@@ -23,6 +24,7 @@ function accountDetachService(SimcardUserReferenceService $references): SimcardS
         Mockery::mock(EsimCryptoService::class),
         Mockery::mock(EsimMarketingRefundOfferService::class),
         $references,
+        Mockery::mock(VirtualEsimQuotaService::class),
     );
 }
 

@@ -7,6 +7,7 @@ use App\Models\Simcard;
 use App\Models\SimcardAutoTopup;
 use App\Services\EsimAutoTopupService;
 use App\Services\SimcardActionLinkService;
+use App\Services\VirtualEsimQuotaService;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -38,6 +39,7 @@ class EsimaccessWebhookService
         private readonly SimcardActionLinkService $actionLinks,
         private readonly EsimMarketingRefundOfferService $marketingRefundOffer,
         private readonly EsimAutoTopupService $autoTopupService,
+        private readonly VirtualEsimQuotaService $virtualQuotaService,
     ) {}
 
     public function handle(array $payload): array
@@ -167,6 +169,26 @@ class EsimaccessWebhookService
                         'exception' => $this->safeExceptionName($exception),
                     ]);
                     $result['auto_topup'] = [
+                        'status' => 'retryable',
+                        'reason' => 'trigger_processing_failed',
+                    ];
+                }
+            }
+
+            if ($notifyType === 'DATA_USAGE' && ! empty($result['simcard_id'])) {
+                try {
+                    // Run after Auto Top-Up. If a paid top-up extended the virtual
+                    // entitlement, quota evaluation sees the new allowance and does
+                    // not suspend the profile at the old threshold.
+                    $result['virtual_quota'] = $this->virtualQuotaService->processStoredUsage((string) $result['simcard_id']);
+                } catch (Throwable $exception) {
+                    // Quota suspension is isolated onto the dedicated persistent queue.
+                    // A trigger error must never make the provider webhook fail.
+                    Log::warning('Virtual eSIM quota trigger failed after DATA_USAGE webhook.', [
+                        'simcard_id' => (string) $result['simcard_id'],
+                        'exception' => $this->safeExceptionName($exception),
+                    ]);
+                    $result['virtual_quota'] = [
                         'status' => 'retryable',
                         'reason' => 'trigger_processing_failed',
                     ];

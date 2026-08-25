@@ -214,6 +214,28 @@ class EsimaccessProvider implements EsimProvider
         throw new RuntimeException('The eSIMAccess cancellation response was not valid JSON.');
     }
 
+    public function suspendEsim(string $iccid, string $account = self::ACCOUNT_PRIMARY): array
+    {
+        $payload = ['iccid' => trim($iccid)];
+
+        return $this->http()
+            ->withHeaders($this->createHeaders($payload, $account))
+            ->post($this->baseUrl . '/v1/open/esim/suspend', $payload)
+            ->throw()
+            ->json();
+    }
+
+    public function unsuspendEsim(string $iccid, string $account = self::ACCOUNT_PRIMARY): array
+    {
+        $payload = ['iccid' => trim($iccid)];
+
+        return $this->http()
+            ->withHeaders($this->createHeaders($payload, $account))
+            ->post($this->baseUrl . '/v1/open/esim/unsuspend', $payload)
+            ->throw()
+            ->json();
+    }
+
     public function topup(string $iccid, string $packageCode, string $transactionId, string $account = self::ACCOUNT_PRIMARY): array
     {
         $payload = [

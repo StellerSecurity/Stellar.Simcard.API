@@ -11,12 +11,13 @@ use RuntimeException;
 use Throwable;
 
 /**
- * Resolves a virtual Stellar fixed-data plan into one real BASE package plus
- * zero or more provider-approved TOPUP packages.
+ * Resolves a virtual Stellar fixed-data plan into either:
+ * 1) one real BASE package plus provider-approved TOPUP packages that exactly
+ *    match the advertised data allowance; or
+ * 2) the smallest larger real BASE package with a Stellar-enforced usage quota.
  *
- * eSIMAccess top-ups add both data and validity. Stellar's hard guarantee is
- * exact advertised DATA. Provider validity may equal or exceed the advertised
- * minimum validity because a TOPUP can only extend, never shorten, validity.
+ * Exact composition is always preferred. Quota-capped fallback exists only when
+ * the provider cannot compose the advertised data amount exactly.
  */
 class VirtualEsimPlanResolver
 {
@@ -42,7 +43,6 @@ class VirtualEsimPlanResolver
         }
 
         $solutions = [];
-        $successfulCatalogQueries = 0;
         $lastRetryableException = null;
 
         foreach ($normalizedCandidates as $candidate) {
@@ -68,7 +68,6 @@ class VirtualEsimPlanResolver
 
             try {
                 $providerResponse = $this->topupCatalogForBase((string) $candidate['package_code']);
-                $successfulCatalogQueries++;
             } catch (Throwable $exception) {
                 if ($this->isRetryableProviderException($exception)) {
                     $lastRetryableException = $exception;
@@ -99,16 +98,22 @@ class VirtualEsimPlanResolver
         }
 
         if ($solutions === []) {
-            if ($lastRetryableException !== null && $successfulCatalogQueries === 0) {
-                throw new RuntimeException(
-                    'Virtual plan resolution is temporarily unavailable: ' . $lastRetryableException->getMessage(),
-                    503,
-                    $lastRetryableException,
-                );
+            // A larger BASE can keep the virtual size sellable when exact composition
+            // is impossible. Customer-facing allowance is capped at the advertised
+            // entitlement and the quota worker suspends service once provider-reported
+            // usage reaches it. Provider usage reporting is not real-time, so this is a
+            // best-effort enforcement fallback rather than a byte-perfect network cap.
+            $quotaFallback = $this->quotaCappedFallback(
+                $normalizedCandidates,
+                $targetDataBytes,
+                $targetDurationDays,
+            );
+
+            if ($quotaFallback !== null) {
+                return $quotaFallback;
             }
 
             if ($lastRetryableException !== null) {
-                // Do not turn a provider outage/rate-limit into a permanent catalog verdict.
                 throw new RuntimeException(
                     'Virtual plan resolution is temporarily unavailable: ' . $lastRetryableException->getMessage(),
                     503,
@@ -117,7 +122,7 @@ class VirtualEsimPlanResolver
             }
 
             throw new RuntimeException(
-                'No exact-data provider composition exists for this virtual eSIM plan with at least the advertised validity. Larger-plan fallback is disabled.',
+                'No provider composition or quota-capped larger BASE exists for this virtual eSIM plan.',
                 422,
             );
         }
@@ -175,7 +180,6 @@ class VirtualEsimPlanResolver
                 || strlen($packageCode) > 128
                 || $dataBytes <= 0
                 || $durationDays <= 0
-                || $dataBytes > $targetDataBytes + self::MIB
             ) {
                 continue;
             }
@@ -383,6 +387,79 @@ class VirtualEsimPlanResolver
         }
 
         return null;
+    }
+
+    /**
+     * Choose the smallest larger provider BASE that already satisfies the advertised
+     * minimum validity. Stellar then exposes only target_data_bytes to the customer
+     * and requests provider suspension once observed usage reaches that entitlement.
+     * Provider usage reporting can lag, so enforcement is intentionally described as
+     * best-effort rather than a byte-perfect network-side quota.
+     *
+     * @param array<int,array<string,mixed>> $candidates
+     * @return array<string,mixed>|null
+     */
+    private function quotaCappedFallback(array $candidates, int $targetDataBytes, int $targetDurationDays): ?array
+    {
+        $eligible = array_values(array_filter(
+            $candidates,
+            static fn (array $candidate): bool => (int) ($candidate['data_bytes'] ?? 0) > $targetDataBytes + self::MIB
+                && (int) ($candidate['duration_days'] ?? 0) >= $targetDurationDays,
+        ));
+
+        if ($eligible === []) {
+            return null;
+        }
+
+        usort($eligible, static function (array $left, array $right) use ($targetDataBytes, $targetDurationDays): int {
+            $leftOver = (int) $left['data_bytes'] - $targetDataBytes;
+            $rightOver = (int) $right['data_bytes'] - $targetDataBytes;
+            if ($leftOver !== $rightOver) {
+                return $leftOver <=> $rightOver;
+            }
+
+            $leftValidityOver = (int) $left['duration_days'] - $targetDurationDays;
+            $rightValidityOver = (int) $right['duration_days'] - $targetDurationDays;
+            if ($leftValidityOver !== $rightValidityOver) {
+                return $leftValidityOver <=> $rightValidityOver;
+            }
+
+            return strcmp((string) $left['package_code'], (string) $right['package_code']);
+        });
+
+        $base = $eligible[0];
+        $providerBytes = (int) $base['data_bytes'];
+        $providerDays = (int) $base['duration_days'];
+
+        return [
+            'strategy' => 'quota_capped_provider_plan_v1',
+            'target_data_bytes' => $targetDataBytes,
+            'target_duration_days' => $targetDurationDays,
+            'base' => $base,
+            'topups' => [],
+            'included_topup_count' => 0,
+            'delivered_data_bytes' => $providerBytes,
+            'delivered_duration_days' => $providerDays,
+            'validity_overdelivery_days' => max(0, $providerDays - $targetDurationDays),
+            'provider_data_overdelivery_bytes' => max(0, $providerBytes - $targetDataBytes),
+            'topup_provider_price_raw_total' => 0,
+            'quota' => [
+                'entitlement_bytes' => $targetDataBytes,
+                'provider_allowance_bytes' => $providerBytes,
+                'state' => 'MONITORING',
+                'customer_visible_total_bytes' => $targetDataBytes,
+                'last_checked_at' => null,
+                'last_observed_usage_bytes' => null,
+                'suspend_queued_at' => null,
+                'suspended_at' => null,
+                'paid_topup_session_ids' => [],
+                'enforcement' => [
+                    'mode' => 'provider_reported_usage_suspend',
+                    'poll_interval_seconds' => 300,
+                    'hard_network_cap' => false,
+                ],
+            ],
+        ];
     }
 
     /** @param array<int,array<string,mixed>> $topups */

@@ -27,6 +27,7 @@ return [
         // included top-ups are isolated onto their own persistent connection/queue.
         'connection' => 'database',
         'queue' => 'virtual-esim-topups',
+        'quota_queue' => 'virtual-esim-quota',
     ],
 
     'esimaccess' => [

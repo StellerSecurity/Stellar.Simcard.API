@@ -23,6 +23,7 @@ class SimcardService
         private readonly EsimCryptoService $crypto,
         private readonly EsimMarketingRefundOfferService $marketingRefundOffer,
         private readonly SimcardUserReferenceService $userReferences,
+        private readonly VirtualEsimQuotaService $virtualQuotaService,
     ) {}
 
     /** Fetch plan list from provider */
@@ -219,6 +220,16 @@ class SimcardService
             'esim_tran_no'    => $esim['esimTranNo'] ?? null,
             'location_codes'  => $esim['packageList'][0]['locationCode'] ?? null,
         ];
+
+        $effectiveUsage = $this->virtualQuotaService->effectiveUsage(
+            $simcard,
+            is_numeric($safeProvider['total_bytes']) ? (int) $safeProvider['total_bytes'] : null,
+            is_numeric($safeProvider['used_bytes']) ? (int) $safeProvider['used_bytes'] : null,
+            is_numeric($safeProvider['remaining_bytes']) ? (int) $safeProvider['remaining_bytes'] : null,
+        );
+        $safeProvider['total_bytes'] = $effectiveUsage['total_bytes'];
+        $safeProvider['used_bytes'] = $effectiveUsage['used_bytes'];
+        $safeProvider['remaining_bytes'] = $effectiveUsage['remaining_bytes'];
 
         $install = $this->buildInstallPayload($provider);
         $this->storeInstallPayload($simcard, $planId, $install);
@@ -492,6 +503,13 @@ class SimcardService
 
     private function safeUserSimcardPayload(Simcard $simcard): array
     {
+        $effectiveUsage = $this->virtualQuotaService->effectiveUsage(
+            $simcard,
+            is_numeric($simcard->total_volume) ? (int) $simcard->total_volume : null,
+            is_numeric($simcard->order_usage) ? (int) $simcard->order_usage : null,
+            is_numeric($simcard->remaining_volume) ? (int) $simcard->remaining_volume : null,
+        );
+
         // Installation credentials are deliberately excluded from account listings.
         // They can only be decrypted by the explicit plan_id possession-proof query.
         return [
@@ -504,9 +522,9 @@ class SimcardService
             'smdp_status' => $simcard->smdp_status,
             'data_status' => $simcard->data_status,
             'validity_status' => $simcard->validity_status,
-            'total_bytes' => $simcard->total_volume,
-            'used_bytes' => $simcard->order_usage,
-            'remaining_bytes' => $simcard->remaining_volume,
+            'total_bytes' => $effectiveUsage['total_bytes'],
+            'used_bytes' => $effectiveUsage['used_bytes'],
+            'remaining_bytes' => $effectiveUsage['remaining_bytes'],
             'remaining_validity' => $simcard->remaining_validity,
             'expires_at' => $simcard->expires_at?->toIso8601String(),
             'activated_at' => $simcard->activated_at?->toIso8601String(),
