@@ -7,6 +7,7 @@ use App\Http\Controllers\V1\EsimAutoTopupController;
 use App\Http\Controllers\V1\UnusedEsimCancelController;
 use App\Http\Controllers\V1\Webhooks\EsimaccessWebhookController;
 use App\Http\Middleware\RelayEsimaccessWebhookToWholesale;
+use App\Http\Controllers\V1\Support\SimSupportController;
 
 Route::post('v1/webhooks/esimaccess', EsimaccessWebhookController::class)
     ->middleware(RelayEsimaccessWebhookToWholesale::class);
@@ -71,4 +72,13 @@ Route::prefix('v1/sim')
         Route::delete('/user/all', [SimcardController::class, 'deleteAllUser'])
             ->middleware('throttle:sim.user.write');
 
+    });
+
+
+// Guarded AI Support companion endpoints. These preserve the existing public eSIM API contract.
+Route::prefix('v1/support/sim')
+    ->middleware(['stellar.sim.basic', 'throttle:sim.user.write'])
+    ->group(function () {
+        Route::post('/inspect', [SimSupportController::class, 'inspect']);
+        Route::post('/replace-unused', [SimSupportController::class, 'replaceUnused']);
     });

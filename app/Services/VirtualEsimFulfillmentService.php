@@ -36,6 +36,7 @@ class VirtualEsimFulfillmentService
         int $targetDataBytes,
         int $targetDurationDays,
         array $candidates,
+        ?array $lockedRecipe = null,
     ): array {
         // A recipe is locked on the Simcard record before/with provider creation.
         // Retries must reuse it verbatim; changing BASE/TOPUP composition after one
@@ -47,6 +48,11 @@ class VirtualEsimFulfillmentService
 
         if ($storedRecipe !== null) {
             $recipe = $this->validateLockedRecipe($storedRecipe, $targetDataBytes, $targetDurationDays);
+        } elseif ($lockedRecipe !== null) {
+            // Support replacement reuses the exact original recipe. Never re-resolve a
+            // replacement against a changed provider catalog and accidentally alter the
+            // customer's purchased data/validity composition.
+            $recipe = $this->validateLockedRecipe($lockedRecipe, $targetDataBytes, $targetDurationDays);
         } else {
             // Resolve BEFORE spending provider balance. Exact BASE+TOPUP composition
             // is preferred; otherwise the resolver may select a larger BASE protected
