@@ -3,6 +3,7 @@
 namespace App\Services\Esim;
 
 use App\Models\Simcard;
+use App\Notifications\NotificationEventWithSender;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use StellarSecurity\Notifications\DTO\NotificationEvent;
@@ -112,24 +113,26 @@ class EsimMarketingRefundOfferService
 
         try {
             Notification::send(
-                NotificationEvent::make($eventName)
-                    ->product($product)
-                    ->email($email)
-                    ->payload([
-                        'refund_amount' => (float) config(
-                            'esim-marketing.refund_offer.refund_amount',
-                            10
-                        ),
-                        'discount_percentage' => (int) config(
-                            'esim-marketing.refund_offer.discount_percentage',
-                            20
-                        ),
-                        'support_email' => (string) config(
-                            'esim-marketing.refund_offer.support_email',
-                            'info@stellarsecurity.com'
-                        ),
-                    ])
-                    ->idempotencyKey($idempotencyKey)
+                NotificationEventWithSender::support(
+                    NotificationEvent::make($eventName)
+                        ->product($product)
+                        ->email($email)
+                        ->payload([
+                            'refund_amount' => (float) config(
+                                'esim-marketing.refund_offer.refund_amount',
+                                10
+                            ),
+                            'discount_percentage' => (int) config(
+                                'esim-marketing.refund_offer.discount_percentage',
+                                20
+                            ),
+                            'support_email' => (string) config(
+                                'esim-marketing.refund_offer.support_email',
+                                'info@stellarsecurity.com'
+                            ),
+                        ])
+                        ->idempotencyKey($idempotencyKey)
+                )
             );
 
             Simcard::query()
