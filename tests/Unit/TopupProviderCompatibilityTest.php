@@ -52,6 +52,29 @@ it('keeps the public slug while retaining the provider topup package code', func
         ->and($plans[0]['topup_payload_type'])->toBe('package_code');
 });
 
+it('publishes customer topup pricing in EUR while retaining the provider currency metadata', function (): void {
+    $service = topupServiceWithoutConstructor();
+
+    $customerPlan = invokeTopupPrivate($service, 'customerTopupPlan', [[
+        'package_code' => 'JP_10_30',
+        'price_cents' => 3525,
+        'unit_price_cents' => 3525,
+        'currency' => 'USD',
+        'provider_price_cents' => 3525,
+        'provider_currency' => 'USD',
+        'pricing_source' => 'provider_raw',
+    ]]);
+
+    expect($customerPlan['price_cents'])->toBe(3525)
+        ->and($customerPlan['unit_price_cents'])->toBe(3525)
+        ->and($customerPlan['currency'])->toBe('EUR')
+        ->and($customerPlan['customer_currency'])->toBe('EUR')
+        ->and($customerPlan['provider_currency'])->toBe('USD')
+        ->and($customerPlan['original_currency'])->toBe('USD')
+        ->and($customerPlan['pricing_source'])->toBe('simcard_api_eur')
+        ->and($customerPlan['pricing_version'])->toBe('topup_eur_v1');
+});
+
 it('keeps an ICCID-authorized fixed TOPUP row even when that recharge row reports supportTopUpType 1', function (): void {
     $service = topupServiceWithoutConstructor();
 

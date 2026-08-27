@@ -94,7 +94,10 @@ class TopupService
             'current_plan_location' => $currentPlan !== null ? $this->normalizeLocationList($currentPlan) : [],
         ]);
 
-        $plans = $this->fixedTopupPlans($normalizedPlans);
+        $plans = array_values(array_map(
+            fn (array $plan): array => $this->customerTopupPlan($plan),
+            $this->fixedTopupPlans($normalizedPlans),
+        ));
 
         Log::info('Top-up resolve fixed plans prepared.', [
             'simcard_id' => (string) $simcard->id,
@@ -144,6 +147,7 @@ class TopupService
         }
 
         $matchedPlan = $this->applyTrustedCustomerPricing($matchedPlan, $selectedPlan);
+        $matchedPlan = $this->customerTopupPlan($matchedPlan);
 
         $session = $this->createOrReuseTopupSession($link, $simcard, $matchedPlan, $packageCode);
 
@@ -1671,6 +1675,45 @@ class TopupService
         }
 
         return null;
+    }
+
+    private function customerTopupPlan(array $plan): array
+    {
+        $priceCents = (int) ($plan['price_cents'] ?? $plan['unit_price_cents'] ?? 0);
+        $sourceCurrency = strtoupper(trim((string) ($plan['currency'] ?? '')));
+        $providerCurrency = strtoupper(trim((string) ($plan['provider_currency'] ?? '')));
+
+        if ($sourceCurrency === '') {
+            $sourceCurrency = $providerCurrency !== '' ? $providerCurrency : 'USD';
+        }
+
+        $plan['currency'] = 'EUR';
+        $plan['customer_currency'] = 'EUR';
+
+        if ($priceCents > 0) {
+            $plan['price_cents'] = $priceCents;
+            $plan['unit_price_cents'] = $priceCents;
+            $plan['customer_price_cents'] = $priceCents;
+        }
+
+        if (! isset($plan['original_currency']) || trim((string) $plan['original_currency']) === '') {
+            $plan['original_currency'] = $providerCurrency !== '' ? $providerCurrency : $sourceCurrency;
+        }
+
+        if (! isset($plan['original_price_cents']) && $priceCents > 0) {
+            $plan['original_price_cents'] = (int) ($plan['provider_price_cents'] ?? $priceCents);
+        }
+
+        $pricingSource = trim((string) ($plan['pricing_source'] ?? ''));
+        if ($pricingSource === '' || $pricingSource === 'provider_raw') {
+            $plan['pricing_source'] = 'simcard_api_eur';
+        }
+
+        if (! isset($plan['pricing_version']) || trim((string) $plan['pricing_version']) === '') {
+            $plan['pricing_version'] = 'topup_eur_v1';
+        }
+
+        return array_filter($plan, static fn ($value) => $value !== null && $value !== '');
     }
 
     private function applyTrustedCustomerPricing(array $providerPlan, array $selectedPlan): array
