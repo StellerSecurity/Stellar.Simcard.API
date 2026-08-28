@@ -65,6 +65,10 @@ return [
             'STELLAR_COMMERCE_AUTO_TOPUP_AUTHORIZATION_URL',
             'https://stellarcommerceapiprod.azurewebsites.net/api/v1/esimautotopupcontroller/authorization'
         ),
+        'auto_topup_payment_recovery_url' => env(
+            'STELLAR_COMMERCE_AUTO_TOPUP_PAYMENT_RECOVERY_URL',
+            'https://stellarcommerceapiprod.azurewebsites.net/api/v1/esimautotopupcontroller/payment-recovery'
+        ),
         'username' => env('APPSETTING_API_USERNAME_STELLAR_COMMERCE_API'),
         'password' => env('APPSETTING_API_PASSWORD_STELLAR_COMMERCE_API'),
     ],

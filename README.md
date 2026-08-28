@@ -109,7 +109,15 @@ ESIM_USER_REF_HASH_KEY_V1=...
 
 ## Azure deployment
 
-Use Azure App Service application settings and Key Vault references for all secrets. After deployment:
+Use Azure App Service application settings and Key Vault references for all secrets.
+
+The checked-in Azure pipeline automatically enables `AUTO_MIGRATE`, deploys the
+application, waits for `/up`, and then disables migration boot mode again. The
+application serializes MySQL migrations with an advisory lock, so concurrent
+instances cannot run the migration batch at the same time. A failed migration
+or failed health check fails the deployment.
+
+For a manual deployment, run:
 
 ```bash
 php artisan optimize:clear

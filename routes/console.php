@@ -41,7 +41,7 @@ Artisan::command('esim:process-auto-topups {--limit=100} {--simcard=} {--refresh
         );
 
     $this->info(sprintf(
-        'Processed: %d, triggered: %d, skipped: %d, failed: %d; provider usage attempted: %d, refreshed: %d, skipped: %d, failed: %d; notifications processed: %d, sent: %d, skipped: %d, failed: %d; SMS processed: %d, sent: %d, skipped: %d, failed: %d',
+        'Processed: %d, triggered: %d, skipped: %d, failed: %d; provider usage attempted: %d, refreshed: %d, skipped: %d, failed: %d; notifications processed: %d, sent: %d, skipped: %d, failed: %d; SMS processed: %d, sent: %d, skipped: %d, failed: %d; recovery emails processed: %d, sent: %d, skipped: %d, failed: %d; recovery SMS processed: %d, sent: %d, skipped: %d, failed: %d',
         $summary['processed'],
         $summary['triggered'],
         $summary['skipped'],
@@ -58,6 +58,14 @@ Artisan::command('esim:process-auto-topups {--limit=100} {--simcard=} {--refresh
         $summary['sms_sent'],
         $summary['sms_skipped'],
         $summary['sms_failed'],
+        $summary['payment_recovery_emails_processed'],
+        $summary['payment_recovery_emails_sent'],
+        $summary['payment_recovery_emails_skipped'],
+        $summary['payment_recovery_emails_failed'],
+        $summary['payment_recovery_sms_processed'],
+        $summary['payment_recovery_sms_sent'],
+        $summary['payment_recovery_sms_skipped'],
+        $summary['payment_recovery_sms_failed'],
     ));
 
     return $summary['failed'] > 0 ? 1 : 0;

@@ -41,6 +41,7 @@ class EsimAutoTopupService
         private readonly EsimCryptoService $crypto,
         private readonly EsimProvider $provider,
         private readonly VirtualEsimQuotaService $virtualQuotaService,
+        private readonly EsimAutoTopupPaymentRecoveryService $paymentRecovery,
     ) {}
 
     /**
@@ -277,6 +278,14 @@ class EsimAutoTopupService
             'sms_sent' => 0,
             'sms_skipped' => 0,
             'sms_failed' => 0,
+            'payment_recovery_emails_processed' => 0,
+            'payment_recovery_emails_sent' => 0,
+            'payment_recovery_emails_skipped' => 0,
+            'payment_recovery_emails_failed' => 0,
+            'payment_recovery_sms_processed' => 0,
+            'payment_recovery_sms_sent' => 0,
+            'payment_recovery_sms_skipped' => 0,
+            'payment_recovery_sms_failed' => 0,
         ];
 
         $configsQuery = SimcardAutoTopup::query()
@@ -379,6 +388,18 @@ class EsimAutoTopupService
         $summary['sms_sent'] = $smsSummary['sent'];
         $summary['sms_skipped'] = $smsSummary['skipped'];
         $summary['sms_failed'] = $smsSummary['failed'];
+
+        $recoveryEmailSummary = $this->paymentRecovery->retryPendingEmails($limit);
+        $summary['payment_recovery_emails_processed'] = $recoveryEmailSummary['processed'];
+        $summary['payment_recovery_emails_sent'] = $recoveryEmailSummary['sent'];
+        $summary['payment_recovery_emails_skipped'] = $recoveryEmailSummary['skipped'];
+        $summary['payment_recovery_emails_failed'] = $recoveryEmailSummary['failed'];
+
+        $recoverySmsSummary = $this->paymentRecovery->retryPendingSms($limit);
+        $summary['payment_recovery_sms_processed'] = $recoverySmsSummary['processed'];
+        $summary['payment_recovery_sms_sent'] = $recoverySmsSummary['sent'];
+        $summary['payment_recovery_sms_skipped'] = $recoverySmsSummary['skipped'];
+        $summary['payment_recovery_sms_failed'] = $recoverySmsSummary['failed'];
 
         return $summary;
     }
@@ -605,19 +626,20 @@ class EsimAutoTopupService
     {
         $topupSessionId = $this->uuid($topupSessionId, 'Top-up session id is invalid.');
 
-        DB::transaction(function () use ($topupSessionId, $reason): void {
+        $attemptId = DB::transaction(function () use ($topupSessionId, $reason): ?string {
             $attempt = SimcardAutoTopupAttempt::query()
                 ->where('topup_session_id', $topupSessionId)
                 ->lockForUpdate()
                 ->first();
 
             if ($attempt === null || $attempt->status === self::ATTEMPT_FULFILLED) {
-                return;
+                return null;
             }
 
             $failureReason = trim((string) $reason) ?: 'Auto Top-Up payment failed.';
             $attempt->status = self::ATTEMPT_FAILED;
             $attempt->failure_reason = mb_substr($failureReason, 0, 2000);
+            $attempt->payment_failed_at = $attempt->payment_failed_at ?: now();
             $attempt->save();
 
             $config = SimcardAutoTopup::query()->where('id', $attempt->auto_topup_id)->lockForUpdate()->first();
@@ -633,6 +655,71 @@ class EsimAutoTopupService
                 $config->failure_reason = $attempt->failure_reason;
                 $config->save();
             }
+
+            return (string) $attempt->id;
+        });
+
+        if ($attemptId !== null) {
+            // Recovery delivery is deliberately outside the payment-state
+            // transaction. Notification outages must not undo a recorded decline.
+            $this->paymentRecovery->notify($attemptId);
+        }
+    }
+
+    public function markPaymentMethodUpdated(string $topupSessionId): string
+    {
+        $topupSessionId = $this->uuid($topupSessionId, 'Top-up session id is invalid.');
+
+        return DB::transaction(function () use ($topupSessionId): string {
+            $attempt = SimcardAutoTopupAttempt::query()
+                ->where('topup_session_id', $topupSessionId)
+                ->lockForUpdate()
+                ->first();
+
+            if ($attempt === null || $attempt->payment_failed_at === null) {
+                return 'not_found';
+            }
+
+            $config = SimcardAutoTopup::query()
+                ->where('id', $attempt->auto_topup_id)
+                ->lockForUpdate()
+                ->first();
+
+            if ($config === null) {
+                return 'not_found';
+            }
+
+            if ($attempt->payment_recovered_at !== null) {
+                return 'already_processed';
+            }
+
+            if (! $config->enabled) {
+                return 'disabled';
+            }
+
+            if ($attempt->status !== self::ATTEMPT_FAILED) {
+                return 'already_processed';
+            }
+
+            $config->cycle = max((int) $config->cycle, (int) $attempt->cycle + 1);
+            $config->state = self::STATE_ARMED;
+            $config->failure_reason = null;
+            $config->meta = array_merge((array) $config->meta, [
+                'payment_method_updated_at' => now()->toIso8601String(),
+                'recovered_attempt_id' => (string) $attempt->id,
+            ]);
+            $config->save();
+
+            // The old hosted URL is a bearer secret and is no longer useful.
+            $attempt->payment_recovery_url_enc = null;
+            $attempt->payment_recovery_expires_at = null;
+            $attempt->payment_recovered_at = now();
+            $attempt->meta = array_merge((array) $attempt->meta, [
+                'payment_method_updated_at' => now()->toIso8601String(),
+            ]);
+            $attempt->save();
+
+            return 'armed';
         });
     }
 

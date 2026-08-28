@@ -131,6 +131,36 @@ class EsimAutoTopupController extends Controller
         }
     }
 
+    public function paymentMethodUpdated(Request $request): JsonResponse
+    {
+        try {
+            $validated = $request->validate([
+                'topup_session_id' => ['required', 'uuid'],
+            ]);
+
+            $status = $this->autoTopupService->markPaymentMethodUpdated(
+                (string) $validated['topup_session_id'],
+            );
+
+            return response()->json([
+                'response_code' => 200,
+                'data' => ['status' => $status],
+            ]);
+        } catch (ValidationException $exception) {
+            return response()->json([
+                'response_code' => 422,
+                'errors' => $exception->errors(),
+            ], 422);
+        } catch (RuntimeException $exception) {
+            return $this->runtimeError($exception);
+        } catch (Throwable) {
+            return response()->json([
+                'response_code' => 500,
+                'response_message' => 'Auto Top-Up payment recovery could not be recorded.',
+            ], 500);
+        }
+    }
+
     private function normalizePlanId(string $value): string
     {
         return preg_replace('/\s+/', '', trim($value)) ?? '';

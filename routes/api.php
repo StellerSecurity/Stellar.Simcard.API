@@ -30,6 +30,7 @@ Route::prefix('v1/autotopupcontroller')
         Route::get('/status', [EsimAutoTopupController::class, 'status']);
         Route::post('/manage', [EsimAutoTopupController::class, 'manage']);
         Route::post('/payment-failed', [EsimAutoTopupController::class, 'paymentFailed']);
+        Route::post('/payment-method-updated', [EsimAutoTopupController::class, 'paymentMethodUpdated']);
     });
 
 Route::prefix('v1/sim')

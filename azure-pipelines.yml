@@ -49,6 +49,23 @@ stages:
       workingDirectory: $(rootFolder)
       displayName: 'Composer install'
 
+    - script: |
+        set -euo pipefail
+        export APP_KEY='base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
+        export DB_CONNECTION=sqlite
+        export DB_DATABASE=':memory:'
+        export ESIM_PLAN_HASH_KEY='ci-only-hash-key'
+        export ESIM_PLAN_MASTER_KEY='ci-only-master-key'
+
+        php artisan migrate:fresh --force --no-interaction
+        vendor/bin/pest \
+          tests/Unit/AutomaticDatabaseMigrationsTest.php \
+          tests/Unit/AutoTopupPaymentRecoverySecurityTest.php \
+          tests/Feature/AutoTopupPaymentRecoveryEndpointTest.php \
+          tests/Feature/AutoTopupPaymentRecoveryStateTest.php
+      workingDirectory: $(rootFolder)
+      displayName: 'Verify migrations and Auto Top-Up recovery flows'
+
     - task: ArchiveFiles@2
       displayName: 'Archive files'
       inputs:

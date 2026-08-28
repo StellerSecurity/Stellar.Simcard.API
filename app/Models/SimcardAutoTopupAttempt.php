@@ -32,6 +32,16 @@ class SimcardAutoTopupAttempt extends Model
         'sms_attempted_at',
         'sms_sent_at',
         'sms_failure_reason',
+        'payment_recovery_url_enc',
+        'payment_recovery_expires_at',
+        'payment_failed_at',
+        'payment_recovered_at',
+        'payment_failure_notification_attempted_at',
+        'payment_failure_notification_sent_at',
+        'payment_failure_notification_failure_reason',
+        'payment_failure_sms_attempted_at',
+        'payment_failure_sms_sent_at',
+        'payment_failure_sms_failure_reason',
     ];
 
     protected $casts = [
@@ -47,5 +57,16 @@ class SimcardAutoTopupAttempt extends Model
         'notification_sent_at' => 'datetime',
         'sms_attempted_at' => 'datetime',
         'sms_sent_at' => 'datetime',
+        'payment_recovery_expires_at' => 'datetime',
+        'payment_failed_at' => 'datetime',
+        'payment_recovered_at' => 'datetime',
+        'payment_failure_notification_attempted_at' => 'datetime',
+        'payment_failure_notification_sent_at' => 'datetime',
+        'payment_failure_sms_attempted_at' => 'datetime',
+        'payment_failure_sms_sent_at' => 'datetime',
+    ];
+
+    protected $hidden = [
+        'payment_recovery_url_enc',
     ];
 }
