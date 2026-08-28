@@ -13,6 +13,9 @@ variables:
   # Web app name
   webAppName: 'StellarSimcardApiProd'
 
+  # Azure resource group containing the production App Service.
+  resourceGroupName: 'switzerland_group'
+
   # Agent VM image name
   vmImageName: 'ubuntu-latest'
 
@@ -72,6 +75,20 @@ stages:
       runOnce:
         deploy:
           steps:
+          - task: AzureCLI@2
+            displayName: 'Enable locked automatic database migrations'
+            inputs:
+              azureSubscription: $(azureSubscription)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                az webapp config appsettings set \
+                  --resource-group $(resourceGroupName) \
+                  --name $(webAppName) \
+                  --settings AUTO_MIGRATE=true \
+                  --output none
+
           - task: AzureWebApp@1
             displayName: 'Deploy Azure Web App : StellarSimcardApiProd'
             inputs:
@@ -79,3 +96,77 @@ stages:
               appName: $(webAppName)
               appType: webAppLinux
               package: $(Pipeline.Workspace)/drop/$(Build.BuildId).zip
+
+          - task: AzureCLI@2
+            displayName: 'Verify application boot and migrations'
+            inputs:
+              azureSubscription: $(azureSubscription)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                host_name="$(az webapp show \
+                  --resource-group $(resourceGroupName) \
+                  --name $(webAppName) \
+                  --query defaultHostName \
+                  --output tsv)"
+
+                for attempt in {1..18}; do
+                  if curl --fail --silent --show-error \
+                    --max-time 20 \
+                    "https://${host_name}/up" >/dev/null; then
+                    echo "Application booted successfully; automatic migrations completed."
+                    exit 0
+                  fi
+
+                  echo "Waiting for application boot (${attempt}/18)..."
+                  sleep 10
+                done
+
+                echo "Application did not become healthy after deployment." >&2
+                exit 1
+
+          - task: AzureCLI@2
+            displayName: 'Disable migration boot mode'
+            condition: always()
+            inputs:
+              azureSubscription: $(azureSubscription)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                az webapp config appsettings set \
+                  --resource-group $(resourceGroupName) \
+                  --name $(webAppName) \
+                  --settings AUTO_MIGRATE=false \
+                  --output none
+
+          - task: AzureCLI@2
+            displayName: 'Verify steady-state application health'
+            condition: succeeded()
+            inputs:
+              azureSubscription: $(azureSubscription)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                host_name="$(az webapp show \
+                  --resource-group $(resourceGroupName) \
+                  --name $(webAppName) \
+                  --query defaultHostName \
+                  --output tsv)"
+
+                for attempt in {1..12}; do
+                  if curl --fail --silent --show-error \
+                    --max-time 20 \
+                    "https://${host_name}/up" >/dev/null; then
+                    echo "Application is healthy with migration boot mode disabled."
+                    exit 0
+                  fi
+
+                  echo "Waiting for steady-state application health (${attempt}/12)..."
+                  sleep 10
+                done
+
+                echo "Application did not return to steady-state health." >&2
+                exit 1
