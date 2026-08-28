@@ -49,6 +49,10 @@ return [
 
     'stellar_commerce' => [
         'topup_checkout_url' => env('STELLAR_COMMERCE_TOPUP_CHECKOUT_URL'),
+        'vpn_topup_offer_url' => env(
+            'STELLAR_COMMERCE_VPN_TOPUP_OFFER_URL',
+            'https://stellarcommerceapiprod.azurewebsites.net/api/v1/topupcheckoutcontroller/vpn-offer'
+        ),
         'auto_topup_charge_url' => env(
             'STELLAR_COMMERCE_AUTO_TOPUP_CHARGE_URL',
             'https://stellarcommerceapiprod.azurewebsites.net/api/v1/esimautotopupcontroller/charge'

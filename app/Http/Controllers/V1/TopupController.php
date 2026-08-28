@@ -79,12 +79,16 @@ class TopupController extends Controller
                 'token' => ['required', 'string', 'max:128'],
                 'package_code' => ['required', 'string', 'max:128'],
                 'plan' => ['nullable', 'array'],
+                'vpn_topup_requested' => ['nullable', 'boolean'],
+                'vpn_topup_consent_version' => ['nullable', 'string', 'max:64'],
             ]);
 
             $result = $this->topupService->checkout(
                 token: (string) $validated['token'],
                 packageCode: (string) $validated['package_code'],
                 selectedPlan: $validated['plan'] ?? [],
+                vpnTopupRequested: (bool) ($validated['vpn_topup_requested'] ?? false),
+                vpnTopupConsentVersion: (string) ($validated['vpn_topup_consent_version'] ?? ''),
             );
 
             $status = (int) ($result['status_code'] ?? 200);

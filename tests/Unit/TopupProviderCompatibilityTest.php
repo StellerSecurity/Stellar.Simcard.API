@@ -2,6 +2,7 @@
 
 use App\Models\Simcard;
 use App\Services\TopupService;
+use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
 uses(TestCase::class);
@@ -233,4 +234,62 @@ it('blocks included virtual topups for terminal esim states', function (): void 
 
     expect(fn () => invokeTopupPrivate($service, 'assertIncludedVirtualTopupEligible', [$simcard]))
         ->toThrow(RuntimeException::class, 'no longer eligible');
+});
+
+it('does not offer vpn topup when the esim commerce link is incomplete', function (): void {
+    Http::fake();
+
+    $simcard = new Simcard;
+    $simcard->forceFill([
+        'commerce_order_id' => null,
+        'commerce_order_item_id' => null,
+        'commerce_unit' => null,
+    ]);
+
+    $offer = invokeTopupPrivate(topupServiceWithoutConstructor(), 'resolveVpnTopupOffer', [$simcard]);
+
+    expect($offer['available'])->toBeFalse()
+        ->and($offer['reason_code'])->toBe('ESIM_LINK_MISSING');
+    Http::assertNothingSent();
+});
+
+it('publishes only a server verified vpn topup offer for a linked esim', function (): void {
+    config()->set('services.stellar_commerce.vpn_topup_offer_url', 'https://commerce.test/api/v1/topupcheckoutcontroller/vpn-offer');
+
+    Http::fake([
+        'https://commerce.test/*' => Http::response([
+            'response_code' => 200,
+            'data' => [
+                'available' => true,
+                'name' => 'Add 30 days to Stellar VPN',
+                'days' => 30,
+                'price_cents' => 50,
+                'currency' => 'EUR',
+                'current_expires_at' => '2026-09-01T00:00:00Z',
+                'projected_expires_at' => '2026-10-01T00:00:00Z',
+                'consent_version' => 'esim_vpn_topup_v1',
+                'internal_subscription_id' => 'must-not-leak',
+            ],
+        ]),
+    ]);
+
+    $simcard = new Simcard;
+    $simcard->forceFill([
+        'id' => 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        'commerce_order_id' => '11111111-1111-4111-8111-111111111111',
+        'commerce_order_item_id' => '22222222-2222-4222-8222-222222222222',
+        'commerce_unit' => 2,
+    ]);
+
+    $offer = invokeTopupPrivate(topupServiceWithoutConstructor(), 'resolveVpnTopupOffer', [$simcard]);
+
+    expect($offer['available'])->toBeTrue()
+        ->and($offer['days'])->toBe(30)
+        ->and($offer['price_cents'])->toBe(50)
+        ->and($offer['consent_version'])->toBe('esim_vpn_topup_v1')
+        ->and($offer)->not->toHaveKey('internal_subscription_id');
+
+    Http::assertSent(fn ($request): bool => $request['parent_order_id'] === $simcard->commerce_order_id
+        && $request['parent_order_item_id'] === $simcard->commerce_order_item_id
+        && $request['commerce_unit'] === 2);
 });

@@ -120,10 +120,17 @@ class TopupService
             'current_plan' => $currentPlan ? $this->safePlanPayload($currentPlan) : null,
             'plans' => $plans,
             'topups' => $plans,
+            'vpn_topup_offer' => $this->resolveVpnTopupOffer($simcard),
         ];
     }
 
-    public function checkout(string $token, string $packageCode, array $selectedPlan = []): array
+    public function checkout(
+        string $token,
+        string $packageCode,
+        array $selectedPlan = [],
+        bool $vpnTopupRequested = false,
+        string $vpnTopupConsentVersion = '',
+    ): array
     {
         [$link, $simcard, $iccid] = $this->resolveValidLink($token);
         $this->assertTopupEligible($simcard);
@@ -149,6 +156,10 @@ class TopupService
         $matchedPlan = $this->applyTrustedCustomerPricing($matchedPlan, $selectedPlan);
         $matchedPlan = $this->customerTopupPlan($matchedPlan);
 
+        if ($vpnTopupRequested && ! $this->hasCommerceVpnLink($simcard)) {
+            throw new RuntimeException('VPN top-up is not available for this eSIM.', 422);
+        }
+
         $session = $this->createOrReuseTopupSession($link, $simcard, $matchedPlan, $packageCode);
 
         $commerceUrl = trim((string) config('services.stellar_commerce.payment_checkout_url', ''));
@@ -173,7 +184,14 @@ class TopupService
             ];
         }
 
-        return $this->createCommerceCheckout($commerceUrl, $session, $matchedPlan);
+        return $this->createCommerceCheckout(
+            $commerceUrl,
+            $session,
+            $matchedPlan,
+            $simcard,
+            $vpnTopupRequested,
+            $vpnTopupConsentVersion,
+        );
     }
 
     /**
@@ -968,7 +986,14 @@ class TopupService
         });
     }
 
-    private function createCommerceCheckout(string $commerceUrl, SimcardTopupSession $session, array $plan): array
+    private function createCommerceCheckout(
+        string $commerceUrl,
+        SimcardTopupSession $session,
+        array $plan,
+        Simcard $simcard,
+        bool $vpnTopupRequested,
+        string $vpnTopupConsentVersion,
+    ): array
     {
         $payload = [
             'source' => 'SIMCARD_TOPUP',
@@ -980,6 +1005,11 @@ class TopupService
             'amount_cents' => (int) $session->price_cents,
             'plan' => $this->safePlanPayload($plan),
             'idempotency_key' => (string) $session->idempotency_key,
+            'vpn_topup_requested' => $vpnTopupRequested,
+            'vpn_topup_consent_version' => $vpnTopupRequested ? trim($vpnTopupConsentVersion) : null,
+            'parent_order_id' => $vpnTopupRequested ? (string) $simcard->commerce_order_id : null,
+            'parent_order_item_id' => $vpnTopupRequested ? (string) $simcard->commerce_order_item_id : null,
+            'commerce_unit' => $vpnTopupRequested ? max(1, (int) $simcard->commerce_unit) : null,
         ];
 
         $username = (string) config('services.stellar_commerce.username', '');
@@ -1030,6 +1060,85 @@ class TopupService
 
             throw new RuntimeException('Top-up checkout could not be created.', 502);
         }
+    }
+
+    /** @return array<string,mixed> */
+    private function resolveVpnTopupOffer(Simcard $simcard): array
+    {
+        if (! $this->hasCommerceVpnLink($simcard)) {
+            return [
+                'available' => false,
+                'reason_code' => 'ESIM_LINK_MISSING',
+            ];
+        }
+
+        $url = trim((string) config('services.stellar_commerce.vpn_topup_offer_url', ''));
+        if ($url === '') {
+            return [
+                'available' => false,
+                'reason_code' => 'VPN_TOPUP_NOT_CONFIGURED',
+            ];
+        }
+
+        $username = (string) config('services.stellar_commerce.username', '');
+        $password = (string) config('services.stellar_commerce.password', '');
+
+        try {
+            $request = Http::acceptJson()
+                ->asJson()
+                ->timeout(12)
+                ->connectTimeout(5)
+                ->retry(1, 100, fn ($exception) => $exception instanceof ConnectionException);
+
+            if ($username !== '' || $password !== '') {
+                $request = $request->withBasicAuth($username, $password);
+            }
+
+            $response = $request->post($url, [
+                'parent_order_id' => (string) $simcard->commerce_order_id,
+                'parent_order_item_id' => (string) $simcard->commerce_order_item_id,
+                'commerce_unit' => max(1, (int) $simcard->commerce_unit),
+            ]);
+            $body = $response->json();
+            $offer = is_array($body) && is_array($body['data'] ?? null) ? $body['data'] : [];
+
+            if ($response->failed() || ! ($offer['available'] ?? false)) {
+                return [
+                    'available' => false,
+                    'reason_code' => (string) ($offer['reason_code'] ?? 'VPN_SUBSCRIPTION_UNVERIFIED'),
+                ];
+            }
+
+            return [
+                'available' => true,
+                'name' => (string) ($offer['name'] ?? 'Stellar VPN top-up'),
+                'days' => (int) ($offer['days'] ?? 0),
+                'price_cents' => (int) ($offer['price_cents'] ?? 0),
+                'currency' => strtoupper((string) ($offer['currency'] ?? 'EUR')),
+                'charge_timing' => 'immediate',
+                'fulfillment_timing' => 'after_payment',
+                'current_expires_at' => $offer['current_expires_at'] ?? null,
+                'projected_expires_at' => $offer['projected_expires_at'] ?? null,
+                'consent_version' => (string) ($offer['consent_version'] ?? ''),
+            ];
+        } catch (Throwable $exception) {
+            Log::warning('VPN top-up offer lookup failed.', [
+                'simcard_id' => (string) $simcard->id,
+                'exception' => basename(str_replace('\\', '/', get_class($exception))),
+            ]);
+
+            return [
+                'available' => false,
+                'reason_code' => 'VPN_SUBSCRIPTION_UNVERIFIED',
+            ];
+        }
+    }
+
+    private function hasCommerceVpnLink(Simcard $simcard): bool
+    {
+        return Str::isUuid((string) $simcard->commerce_order_id)
+            && Str::isUuid((string) $simcard->commerce_order_item_id)
+            && (int) $simcard->commerce_unit > 0;
     }
 
     private function nullableTrimmedString(?string $value, int $maxLength): ?string
