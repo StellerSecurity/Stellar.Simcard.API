@@ -185,7 +185,7 @@ class EsimAutoTopupService
             return ['status' => 'disabled'];
         }
 
-        if (strtoupper(trim((string) $simcard->esim_status)) !== 'IN_USE') {
+        if (! $this->isAutoTopupLifecycleEligible($simcard->esim_status)) {
             return ['status' => 'skipped', 'reason' => 'esim_not_in_use'];
         }
 
@@ -324,7 +324,7 @@ class EsimAutoTopupService
                         continue;
                     }
 
-                    if (strtoupper(trim((string) $simcard->esim_status)) !== 'IN_USE') {
+                    if (! $this->isAutoTopupLifecycleEligible($simcard->esim_status)) {
                         $summary['skipped']++;
                         continue;
                     }
@@ -394,7 +394,7 @@ class EsimAutoTopupService
      */
     private function refreshUsageFromProvider(Simcard $simcard): array
     {
-        if (strtoupper(trim((string) $simcard->esim_status)) !== 'IN_USE') {
+        if (! $this->isAutoTopupLifecycleEligible($simcard->esim_status)) {
             return ['status' => 'skipped', 'reason' => 'esim_not_in_use'];
         }
 
@@ -505,7 +505,7 @@ class EsimAutoTopupService
                     'provider_account' => $account,
                     'esim_status' => $providerStatus !== '' ? $providerStatus : (string) $simcard->esim_status,
                     'remaining_percent' => round($remainingPercent, 2),
-                    'eligible' => ($providerStatus === '' || $providerStatus === 'IN_USE')
+                    'eligible' => ($providerStatus === '' || $this->isAutoTopupLifecycleEligible($providerStatus))
                         && $remainingPercent <= self::TRIGGER_PERCENT,
                 ]);
             }
@@ -699,7 +699,7 @@ class EsimAutoTopupService
             // Use the same SIM -> config lock order as management/provisioning.
             // The final config checks below remain authoritative.
             $simcard = Simcard::query()->where('id', $simcardId)->lockForUpdate()->first();
-            if ($simcard === null || strtoupper(trim((string) $simcard->esim_status)) !== 'IN_USE') {
+            if ($simcard === null || ! $this->isAutoTopupLifecycleEligible($simcard->esim_status)) {
                 return [null, null];
             }
 
@@ -1481,6 +1481,15 @@ class EsimAutoTopupService
 
             return $locked->fresh();
         });
+    }
+
+    private function isAutoTopupLifecycleEligible(mixed $status): bool
+    {
+        return in_array(
+            strtoupper(trim((string) $status)),
+            ['IN_USE', 'USED_UP'],
+            true,
+        );
     }
 
     private function uuid(string $value, string $message): string

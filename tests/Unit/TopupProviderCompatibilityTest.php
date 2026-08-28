@@ -179,6 +179,16 @@ it('allows customer topups for all eSIMAccess topup lifecycle states', function 
     expect(true)->toBeTrue();
 })->with(['GOT_RESOURCE', 'IN_USE', 'USED_UP']);
 
+it('allows auto topups while an eSIM is active or used up', function (string $providerStatus): void {
+    $service = topupServiceWithoutConstructor();
+    $simcard = new Simcard;
+    $simcard->forceFill(['esim_status' => $providerStatus]);
+
+    invokeTopupPrivate($service, 'assertAutoTopupEligible', [$simcard]);
+
+    expect(true)->toBeTrue();
+})->with(['IN_USE', 'USED_UP']);
+
 it('allows legacy records in ready or active local states when provider status is unavailable', function (string $state): void {
     $service = topupServiceWithoutConstructor();
     $simcard = new Simcard;

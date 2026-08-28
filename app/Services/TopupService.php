@@ -1239,8 +1239,8 @@ class TopupService
 
     private function assertAutoTopupEligible(Simcard $simcard): void
     {
-        if (strtoupper(trim((string) $simcard->esim_status)) !== 'IN_USE') {
-            throw new RuntimeException('Auto Top-Up only runs while the eSIM is IN_USE.', 409);
+        if (! in_array(strtoupper(trim((string) $simcard->esim_status)), ['IN_USE', 'USED_UP'], true)) {
+            throw new RuntimeException('Auto Top-Up only runs while the eSIM is active or used up.', 409);
         }
     }
 
