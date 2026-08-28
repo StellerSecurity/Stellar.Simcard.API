@@ -51,6 +51,23 @@ stages:
 
     - script: |
         set -euo pipefail
+
+        required_directories=(
+          storage/logs
+          storage/framework/cache/data
+          storage/framework/sessions
+          storage/framework/views
+        )
+
+        for directory in "${required_directories[@]}"; do
+          test -d "$directory"
+          test -w "$directory"
+        done
+      workingDirectory: $(rootFolder)
+      displayName: 'Verify Laravel runtime directories'
+
+    - script: |
+        set -euo pipefail
         export APP_KEY='base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
         export DB_CONNECTION=sqlite
         export DB_DATABASE=':memory:'
