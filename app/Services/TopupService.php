@@ -1273,12 +1273,13 @@ class TopupService
         $providerStatus = strtoupper(trim((string) $simcard->esim_status));
         $fallbackState = strtolower(trim((string) $simcard->state));
 
-        // eSIMAccess permits top-up both before first use (GOT_RESOURCE / New)
-        // and while the profile is active (IN_USE). When the provider has
-        // supplied an eSIM status, it is authoritative. Older records without
-        // that field may fall back to the normalized local state.
+        // eSIMAccess permits top-up before first use (GOT_RESOURCE / New),
+        // while the profile is active (IN_USE), and after its data allowance
+        // has been consumed (USED_UP). When the provider has supplied an eSIM
+        // status, it is authoritative. Older records without that field may
+        // fall back to the normalized local state.
         $eligible = $providerStatus !== ''
-            ? in_array($providerStatus, ['GOT_RESOURCE', 'IN_USE'], true)
+            ? in_array($providerStatus, ['GOT_RESOURCE', 'IN_USE', 'USED_UP'], true)
             : in_array($fallbackState, ['ok', 'active'], true);
 
         if (! $eligible && $this->virtualQuotaService->allowsPaidTopupWhileSuspended($simcard)) {

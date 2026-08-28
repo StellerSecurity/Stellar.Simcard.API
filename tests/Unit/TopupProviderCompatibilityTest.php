@@ -177,7 +177,7 @@ it('allows customer topups for all eSIMAccess topup lifecycle states', function 
     invokeTopupPrivate($service, 'assertTopupEligible', [$simcard]);
 
     expect(true)->toBeTrue();
-})->with(['GOT_RESOURCE', 'IN_USE']);
+})->with(['GOT_RESOURCE', 'IN_USE', 'USED_UP']);
 
 it('allows legacy records in ready or active local states when provider status is unavailable', function (string $state): void {
     $service = topupServiceWithoutConstructor();
