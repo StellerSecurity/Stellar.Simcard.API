@@ -1,8 +1,10 @@
 <?php
 
+use App\Models\Simcard;
 use App\Services\TopupService;
+use Tests\TestCase;
 
-uses(Tests\TestCase::class);
+uses(TestCase::class);
 
 function topupServiceWithoutConstructor(): TopupService
 {
@@ -147,9 +149,9 @@ it('does not expose Day Pass plans through the fixed-plan fulfillment contract',
     expect($fixedPlans)->toBe([]);
 });
 
-it('allows internally funded virtual topups before first use without relaxing customer topup rules', function (): void {
+it('allows customer and internally funded virtual topups before first use', function (): void {
     $service = topupServiceWithoutConstructor();
-    $simcard = new \App\Models\Simcard();
+    $simcard = new Simcard;
     $simcard->forceFill([
         'esim_status' => 'GOT_RESOURCE',
         'state' => 'pending',
@@ -158,14 +160,65 @@ it('allows internally funded virtual topups before first use without relaxing cu
     // Included virtual composition may run before installation.
     invokeTopupPrivate($service, 'assertIncludedVirtualTopupEligible', [$simcard]);
 
-    // Existing customer-initiated top-up contract remains IN_USE-only.
+    // eSIMAccess also permits customer top-up while the profile is New.
+    invokeTopupPrivate($service, 'assertTopupEligible', [$simcard]);
+
+    expect(true)->toBeTrue();
+});
+
+it('allows customer topups for all eSIMAccess topup lifecycle states', function (string $providerStatus): void {
+    $service = topupServiceWithoutConstructor();
+    $simcard = new Simcard;
+    $simcard->forceFill([
+        'esim_status' => $providerStatus,
+        'state' => 'pending',
+    ]);
+
+    invokeTopupPrivate($service, 'assertTopupEligible', [$simcard]);
+
+    expect(true)->toBeTrue();
+})->with(['GOT_RESOURCE', 'IN_USE']);
+
+it('allows legacy records in ready or active local states when provider status is unavailable', function (string $state): void {
+    $service = topupServiceWithoutConstructor();
+    $simcard = new Simcard;
+    $simcard->forceFill([
+        'esim_status' => null,
+        'state' => $state,
+    ]);
+
+    invokeTopupPrivate($service, 'assertTopupEligible', [$simcard]);
+
+    expect(true)->toBeTrue();
+})->with(['OK', 'active']);
+
+it('continues to reject terminal eSIMAccess states for customer topups', function (string $providerStatus): void {
+    $service = app(TopupService::class);
+    $simcard = new Simcard;
+    $simcard->forceFill([
+        'esim_status' => $providerStatus,
+        'state' => 'active',
+    ]);
+
     expect(fn () => invokeTopupPrivate($service, 'assertTopupEligible', [$simcard]))
-        ->toThrow(RuntimeException::class, 'Only eSIMs currently in use can be topped up.');
+        ->toThrow(RuntimeException::class, 'Only New or active, unexpired eSIMs can be topped up.');
+})->with(['EXPIRED', 'CANCELLED', 'REVOKED']);
+
+it('continues to reject unallocated legacy records', function (): void {
+    $service = app(TopupService::class);
+    $simcard = new Simcard;
+    $simcard->forceFill([
+        'esim_status' => null,
+        'state' => 'pending',
+    ]);
+
+    expect(fn () => invokeTopupPrivate($service, 'assertTopupEligible', [$simcard]))
+        ->toThrow(RuntimeException::class, 'Only New or active, unexpired eSIMs can be topped up.');
 });
 
 it('blocks included virtual topups for terminal esim states', function (): void {
     $service = topupServiceWithoutConstructor();
-    $simcard = new \App\Models\Simcard();
+    $simcard = new Simcard;
     $simcard->forceFill(['esim_status' => 'EXPIRED']);
 
     expect(fn () => invokeTopupPrivate($service, 'assertIncludedVirtualTopupEligible', [$simcard]))
