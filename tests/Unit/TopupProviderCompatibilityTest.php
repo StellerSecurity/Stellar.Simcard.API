@@ -293,3 +293,20 @@ it('publishes only a server verified vpn topup offer for a linked esim', functio
         && $request['parent_order_item_id'] === $simcard->commerce_order_item_id
         && $request['commerce_unit'] === 2);
 });
+
+it('uses a separate checkout session when the vpn topup selection changes', function (): void {
+    $service = topupServiceWithoutConstructor();
+    $arguments = [
+        'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        ['currency' => 'EUR', 'price_cents' => 538],
+        'DK_10_30',
+    ];
+
+    $withoutVpn = invokeTopupPrivate($service, 'topupSessionIdempotencyKey', [...$arguments, false]);
+    $withVpn = invokeTopupPrivate($service, 'topupSessionIdempotencyKey', [...$arguments, true]);
+    $withVpnRetry = invokeTopupPrivate($service, 'topupSessionIdempotencyKey', [...$arguments, true]);
+
+    expect($withVpn)->not->toBe($withoutVpn)
+        ->and($withVpnRetry)->toBe($withVpn);
+});

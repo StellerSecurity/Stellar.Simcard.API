@@ -160,7 +160,13 @@ class TopupService
             throw new RuntimeException('VPN top-up is not available for this eSIM.', 422);
         }
 
-        $session = $this->createOrReuseTopupSession($link, $simcard, $matchedPlan, $packageCode);
+        $session = $this->createOrReuseTopupSession(
+            $link,
+            $simcard,
+            $matchedPlan,
+            $packageCode,
+            $vpnTopupRequested,
+        );
 
         $commerceUrl = trim((string) config('services.stellar_commerce.payment_checkout_url', ''));
         if ($commerceUrl === '') {
@@ -864,18 +870,23 @@ class TopupService
         ], static fn ($value) => $value !== null && $value !== '');
     }
 
-    private function createOrReuseTopupSession(SimcardActionLink $link, Simcard $simcard, array $plan, string $packageCode): SimcardTopupSession
+    private function createOrReuseTopupSession(
+        SimcardActionLink $link,
+        Simcard $simcard,
+        array $plan,
+        string $packageCode,
+        bool $vpnTopupRequested,
+    ): SimcardTopupSession
     {
-        $idempotencyKey = hash('sha256', implode('|', [
-            'simcard-topup-session',
-            $link->id,
-            $simcard->id,
+        $idempotencyKey = $this->topupSessionIdempotencyKey(
+            (string) $link->id,
+            (string) $simcard->id,
+            $plan,
             $packageCode,
-            strtoupper((string) ($plan['currency'] ?? '')),
-            (int) ($plan['price_cents'] ?? $plan['unit_price_cents'] ?? 0),
-        ]));
+            $vpnTopupRequested,
+        );
 
-        return DB::transaction(function () use ($link, $simcard, $plan, $packageCode, $idempotencyKey) {
+        return DB::transaction(function () use ($link, $simcard, $plan, $packageCode, $idempotencyKey, $vpnTopupRequested) {
             $existing = SimcardTopupSession::query()
                 ->where('idempotency_key', $idempotencyKey)
                 ->lockForUpdate()
@@ -901,12 +912,32 @@ class TopupService
                 'plan' => $this->safePlanPayload($plan),
                 'simcard_snapshot' => $this->safeSimPayload($simcard),
                 'source' => 'stellar_data_topup_sms_link',
+                'vpn_topup_requested' => $vpnTopupRequested,
             ];
             $session->requested_at = now();
             $session->save();
 
             return $session;
         });
+    }
+
+    /** @param array<string,mixed> $plan */
+    private function topupSessionIdempotencyKey(
+        string $actionLinkId,
+        string $simcardId,
+        array $plan,
+        string $packageCode,
+        bool $vpnTopupRequested,
+    ): string {
+        return hash('sha256', implode('|', [
+            'simcard-topup-session',
+            $actionLinkId,
+            $simcardId,
+            $packageCode,
+            strtoupper((string) ($plan['currency'] ?? '')),
+            (int) ($plan['price_cents'] ?? $plan['unit_price_cents'] ?? 0),
+            $vpnTopupRequested ? 'vpn' : 'no-vpn',
+        ]));
     }
 
     /**
