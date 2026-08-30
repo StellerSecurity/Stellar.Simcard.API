@@ -541,6 +541,16 @@ class EsimAutoTopupManagementService
         $reasonCode = $fallbackReason
             ?? (string) ($commerce['reason_code'] ?? ($config !== null ? 'available' : 'not_available'));
 
+        $amountCents = isset($commerce['amount_cents']) && is_numeric($commerce['amount_cents'])
+            ? max(0, (int) $commerce['amount_cents'])
+            : null;
+        $serviceFeeCents = isset($commerce['service_fee_cents']) && is_numeric($commerce['service_fee_cents'])
+            ? max(0, (int) $commerce['service_fee_cents'])
+            : null;
+        $totalAmountCents = isset($commerce['total_amount_cents']) && is_numeric($commerce['total_amount_cents'])
+            ? max(0, (int) $commerce['total_amount_cents'])
+            : ($amountCents !== null && $serviceFeeCents !== null ? $amountCents + $serviceFeeCents : $amountCents);
+
         return [
             'visible' => $visible,
             'supported' => $supported,
@@ -554,8 +564,14 @@ class EsimAutoTopupManagementService
             'reason_code' => $reasonCode,
             'saved_card_available' => (bool) ($commerce['saved_card_available'] ?? false),
             'authorization_source' => $commerce['authorization_source'] ?? ($meta['authorization_source'] ?? null),
-            'amount_cents' => isset($commerce['amount_cents']) && is_numeric($commerce['amount_cents'])
-                ? max(0, (int) $commerce['amount_cents'])
+            'amount_cents' => $amountCents,
+            'service_fee_cents' => $serviceFeeCents,
+            'total_amount_cents' => $totalAmountCents,
+            'service_fee_basis_points' => isset($commerce['service_fee_basis_points']) && is_numeric($commerce['service_fee_basis_points'])
+                ? max(0, (int) $commerce['service_fee_basis_points'])
+                : null,
+            'service_fee_type' => isset($commerce['service_fee_type'])
+                ? trim((string) $commerce['service_fee_type']) ?: null
                 : null,
             'currency' => isset($commerce['currency']) ? strtoupper(trim((string) $commerce['currency'])) : null,
             'data_bytes' => max(0, $dataBytes),
