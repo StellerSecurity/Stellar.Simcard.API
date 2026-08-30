@@ -997,6 +997,7 @@ class TopupService
     {
         $payload = [
             'source' => 'SIMCARD_TOPUP',
+            'customer_email' => $this->resolveSimcardEmail($simcard),
             'external_reference' => (string) $session->id,
             'topup_session_id' => (string) $session->id,
             'package_code' => (string) $session->package_code,
@@ -1060,6 +1061,30 @@ class TopupService
 
             throw new RuntimeException('Top-up checkout could not be created.', 502);
         }
+    }
+
+    private function resolveSimcardEmail(Simcard $simcard): ?string
+    {
+        if (empty($simcard->email_enc)) {
+            return null;
+        }
+
+        try {
+            $email = $this->crypto->decryptEmail((string) $simcard->email_enc);
+        } catch (Throwable $exception) {
+            Log::warning('Could not decrypt eSIM email for manual top-up checkout.', [
+                'simcard_id' => (string) $simcard->id,
+                'exception' => basename(str_replace('\\', '/', get_class($exception))),
+            ]);
+
+            return null;
+        }
+
+        $email = $this->crypto->normalizeEmail($email);
+
+        return $email !== null && filter_var($email, FILTER_VALIDATE_EMAIL)
+            ? $email
+            : null;
     }
 
     /** @return array<string,mixed> */
