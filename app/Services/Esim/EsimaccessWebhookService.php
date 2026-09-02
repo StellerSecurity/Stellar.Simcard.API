@@ -33,6 +33,9 @@ class EsimaccessWebhookService
 
     private const REDACTED = '[REDACTED]';
 
+    /** @var array<string, array> */
+    private array $providerResponseCache = [];
+
     public function __construct(
         private readonly EsimCryptoService $crypto,
         private readonly EsimProvider $provider,
@@ -193,6 +196,10 @@ class EsimaccessWebhookService
                         'reason' => 'trigger_processing_failed',
                     ];
                 }
+            }
+
+            if ($notifyType === 'VALIDITY_USAGE') {
+                $this->refreshValidityNotificationLifecycle($content, $result);
             }
 
             $sms = $this->sendWebhookSmsIfNeeded($notifyType, $content, $result);
@@ -409,6 +416,49 @@ class EsimaccessWebhookService
         }
     }
 
+    private function refreshValidityNotificationLifecycle(array $content, array $result): void
+    {
+        $simcardId = $this->nullableString($result['simcard_id'] ?? null);
+        $simcard = $simcardId === null ? null : Simcard::find($simcardId);
+        $orderNo = $this->nullableString($content['orderNo'] ?? null);
+        $iccid = $this->nullableString($content['iccid'] ?? null);
+
+        if ($simcard === null || ($orderNo === null && $iccid === null)) {
+            return;
+        }
+
+        try {
+            $response = $this->providerResponseForWebhook($orderNo, $iccid, $simcard, true);
+            $providerSim = Arr::get($response, 'obj.esimList.0');
+
+            if (! is_array($providerSim)) {
+                return;
+            }
+
+            $providerStatus = $this->nullableString($providerSim['esimStatus'] ?? null);
+            $smdpStatus = $this->nullableString($providerSim['smdpStatus'] ?? null);
+
+            if ($providerStatus !== null) {
+                $simcard->esim_status = strtoupper($providerStatus);
+            }
+
+            if ($smdpStatus !== null) {
+                $simcard->smdp_status = strtoupper($smdpStatus);
+            }
+
+            if ($providerStatus !== null || $smdpStatus !== null) {
+                $simcard->save();
+            }
+        } catch (Throwable $exception) {
+            // The webhook still contains useful validity state. If the live lookup is
+            // unavailable, notification eligibility falls back to the stored lifecycle.
+            Log::info('Could not refresh eSIM lifecycle before expiry notification.', [
+                'simcard_id' => (string) $simcard->id,
+                'exception' => $this->safeExceptionName($exception),
+            ]);
+        }
+    }
+
     private function sendWebhookSmsIfNeeded(string $notifyType, array $content, array $result): ?array
     {
         $simcardId = $this->nullableString($result['simcard_id'] ?? null);
@@ -425,6 +475,13 @@ class EsimaccessWebhookService
             return [
                 'status' => 'skipped',
                 'reason' => 'wholesale_simcard',
+            ];
+        }
+
+        if ($notifyType === 'VALIDITY_USAGE' && ! $this->shouldSendValidityExpiryPrompt($simcard)) {
+            return [
+                'status' => 'skipped',
+                'reason' => 'esim_not_in_use',
             ];
         }
 
@@ -518,6 +575,13 @@ class EsimaccessWebhookService
             return [
                 'status' => 'skipped',
                 'reason' => 'wholesale_simcard',
+            ];
+        }
+
+        if ($notifyType === 'VALIDITY_USAGE' && ! $this->shouldSendValidityExpiryPrompt($simcard)) {
+            return [
+                'status' => 'skipped',
+                'reason' => 'esim_not_in_use',
             ];
         }
 
@@ -636,6 +700,25 @@ class EsimaccessWebhookService
         return null;
     }
 
+    private function shouldSendValidityExpiryPrompt(Simcard $simcard): bool
+    {
+        $smdpStatus = strtoupper(trim((string) $simcard->smdp_status));
+
+        if (in_array($smdpStatus, ['DISABLED', 'DELETED'], true)) {
+            return false;
+        }
+
+        $providerStatus = strtoupper(trim((string) $simcard->esim_status));
+
+        if ($providerStatus !== '') {
+            return $providerStatus === 'IN_USE';
+        }
+
+        // Older rows may predate provider status tracking. Preserve reminders only
+        // when their normalized local lifecycle state still says they are active.
+        return strtolower(trim((string) $simcard->state)) === 'active';
+    }
+
     private function shouldSuppressManualLowDataPrompt(Simcard $simcard): bool
     {
         return SimcardAutoTopup::query()
@@ -688,7 +771,7 @@ class EsimaccessWebhookService
         }
 
         try {
-            $response = $this->provider->queryEsim($orderNo, $iccid, $this->preferredProviderAccount($simcard));
+            $response = $this->providerResponseForWebhook($orderNo, $iccid, $simcard);
             $candidate = $this->extractPackageLabelFromProviderResponse($response);
 
             return $this->sanitizePackageLabelForSms($candidate);
@@ -699,6 +782,28 @@ class EsimaccessWebhookService
 
             return null;
         }
+    }
+
+    private function providerResponseForWebhook(
+        ?string $orderNo,
+        ?string $iccid,
+        Simcard $simcard,
+        bool $remember = false,
+    ): array {
+        $account = $this->preferredProviderAccount($simcard);
+        $cacheKey = hash('sha256', json_encode([$account, $orderNo, $iccid]));
+
+        if (array_key_exists($cacheKey, $this->providerResponseCache)) {
+            return $this->providerResponseCache[$cacheKey];
+        }
+
+        $response = $this->provider->queryEsim($orderNo, $iccid, $account);
+
+        if ($remember) {
+            $this->providerResponseCache[$cacheKey] = $response;
+        }
+
+        return $response;
     }
 
     private function preferredProviderAccount(Simcard $simcard): string
