@@ -54,7 +54,7 @@ it('allows SIM-ID technical inspection for wholesale eSIMs without exposing inst
             'found' => true,
             'email_match' => false,
             'technical_support_verified' => true,
-            'support_identity_mode' => 'wholesale_sim_id_possession',
+            'support_identity_mode' => 'sim_id_possession',
             'eligible_to_replace' => false,
         ])
         ->and(data_get($result, 'provider.esim_tran_no'))->toBe('26082912530032')
@@ -63,7 +63,7 @@ it('allows SIM-ID technical inspection for wholesale eSIMs without exposing inst
         ->and(data_get($result, 'install.lpa'))->toBeNull();
 });
 
-it('does not accept SIM-ID possession when a retail Commerce order belongs to another email', function (): void {
+it('allows delegated technical support for a Commerce-linked SIM without exposing protected data', function (): void {
     $simcard = new Simcard([
         'provider' => 'esimaccess',
         'package_code' => 'RETAIL-10GB',
@@ -75,7 +75,20 @@ it('does not accept SIM-ID possession when a retail Commerce order belongs to an
 
     $simcards = Mockery::mock(SimcardService::class);
     $simcards->shouldReceive('findByPlanId')->once()->andReturn($simcard);
-    $simcards->shouldNotReceive('queryStatusByPlanId');
+    $simcards->shouldReceive('queryStatusByPlanId')->once()->andReturn([
+        'provider' => [
+            'remaining_bytes' => 5368709120,
+            'used_bytes' => 1024,
+            'esim_tran_no' => '26082912530033',
+            'esim_status' => 'IN_USE',
+            'smdp_status' => 'ENABLED',
+        ],
+        'install' => [
+            'apn' => 'internet',
+            'short_url' => 'https://p.qrsim.net/protected-token',
+            'lpa' => 'LPA:1$secret$token',
+        ],
+    ]);
     $crypto = Mockery::mock(EsimCryptoService::class);
     $crypto->shouldReceive('deriveEmailHash')->once()->andReturn('sender-email-hash');
 
@@ -92,9 +105,12 @@ it('does not accept SIM-ID possession when a retail Commerce order belongs to an
         ->toMatchArray([
             'found' => true,
             'email_match' => false,
-            'technical_support_verified' => false,
-            'support_identity_mode' => 'retail_email_mismatch',
-            'provider' => [],
-            'install' => [],
-        ]);
+            'technical_support_verified' => true,
+            'support_identity_mode' => 'sim_id_possession',
+            'eligible_to_replace' => false,
+        ])
+        ->and(data_get($result, 'provider.esim_tran_no'))->toBe('26082912530033')
+        ->and(data_get($result, 'install.apn'))->toBe('internet')
+        ->and(data_get($result, 'install.short_url'))->toBeNull()
+        ->and(data_get($result, 'install.lpa'))->toBeNull();
 });

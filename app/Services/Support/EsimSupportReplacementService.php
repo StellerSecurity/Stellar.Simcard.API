@@ -41,29 +41,12 @@ class EsimSupportReplacementService
         $emailMatch = $simcard->email_hash !== null
             && hash_equals((string) $simcard->email_hash, $this->crypto->deriveEmailHash($email));
 
-        // Wholesale/reseller eSIMs are provisioned outside Stellar Commerce and
-        // therefore cannot match a retail purchase email. The private 16-digit
-        // plan ID is possession proof for read-only technical support, but it
-        // must never authorize automatic replacement or expose install secrets.
-        $wholesalePossessionVerified = ! $emailMatch
-            && trim((string) ($simcard->commerce_order_id ?? '')) === '';
-
-        if (! $emailMatch && ! $wholesalePossessionVerified) {
-            // Do not disclose provider status or install credentials for an eSIM that
-            // cannot be tied to the support sender.
-            return [
-                'found' => true,
-                'email_match' => false,
-                'technical_support_verified' => false,
-                'support_identity_mode' => 'retail_email_mismatch',
-                'used_bytes' => null,
-                'eligible_to_replace' => false,
-                'blocked_reason' => 'OWNERSHIP_NOT_VERIFIED',
-                'provider' => [],
-                'install' => [],
-                'plan' => [],
-            ];
-        }
+        // A reseller or delegated customer may legitimately contact support from
+        // an address that never appears on the upstream Commerce order. Possession
+        // of the private 16-digit plan ID authorizes read-only technical support
+        // only. Email ownership remains mandatory for replacements, install
+        // credentials, refunds, subscriptions, and all other protected actions.
+        $technicalPossessionVerified = ! $emailMatch;
 
         $query = $this->simcards->queryStatusByPlanId($planId);
         $provider = is_array($query['provider'] ?? null) ? $query['provider'] : [];
@@ -91,8 +74,8 @@ class EsimSupportReplacementService
         return [
             'found' => true,
             'email_match' => $emailMatch,
-            'technical_support_verified' => $emailMatch || $wholesalePossessionVerified,
-            'support_identity_mode' => $emailMatch ? 'retail_email' : 'wholesale_sim_id_possession',
+            'technical_support_verified' => $emailMatch || $technicalPossessionVerified,
+            'support_identity_mode' => $emailMatch ? 'retail_email' : 'sim_id_possession',
             'used_bytes' => $usedBytes,
             'eligible_to_replace' => $emailMatch
                 && $usedBytes === 0
