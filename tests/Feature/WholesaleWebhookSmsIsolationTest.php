@@ -12,6 +12,8 @@ use App\Services\SimcardActionLinkService;
 use App\Services\VirtualEsimQuotaService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Mockery;
+use StellarSecurity\Notifications\DTO\NotificationEvent;
+use StellarSecurity\Notifications\Facades\Notification;
 use Tests\TestCase;
 
 class WholesaleWebhookSmsIsolationTest extends TestCase
@@ -20,7 +22,7 @@ class WholesaleWebhookSmsIsolationTest extends TestCase
 
     public function test_variant_a_retail_customer_receives_activation_sms(): void
     {
-        [$service, $provider, $simcard] = $this->webhookServiceFor('commerce_esim_42');
+        [$service, $provider, $simcard, $marketingRefundOffer] = $this->webhookServiceFor('commerce_esim_42');
 
         $provider->shouldReceive('sendSms')
             ->once()
@@ -30,6 +32,7 @@ class WholesaleWebhookSmsIsolationTest extends TestCase
                 'primary',
             )
             ->andReturn(['success' => true]);
+        $marketingRefundOffer->shouldReceive('handleUsageDetected')->once()->andReturn(['status' => 'missing_email']);
 
         $result = $service->handle($this->activationPayload());
 
@@ -40,9 +43,10 @@ class WholesaleWebhookSmsIsolationTest extends TestCase
 
     public function test_variant_b_wholesale_customer_does_not_receive_activation_sms(): void
     {
-        [$service, $provider, $simcard] = $this->webhookServiceFor('wholesale_esim_42');
+        [$service, $provider, $simcard, $marketingRefundOffer] = $this->webhookServiceFor('wholesale_esim_42');
 
         $provider->shouldNotReceive('sendSms');
+        $marketingRefundOffer->shouldNotReceive('handleUsageDetected');
 
         $result = $service->handle($this->activationPayload());
 
@@ -54,10 +58,86 @@ class WholesaleWebhookSmsIsolationTest extends TestCase
         self::assertSame('active', $simcard->fresh()->state);
     }
 
+    public function test_variant_a_retail_customer_receives_low_data_email(): void
+    {
+        [
+            $service,
+            $provider,
+            $simcard,
+            $marketingRefundOffer,
+            $actionLinks,
+            $autoTopupService,
+            $virtualQuotaService,
+        ] = $this->webhookServiceFor('commerce_esim_42', 'retail@example.com');
+
+        $marketingRefundOffer->shouldReceive('handleUsageDetected')->once()->andReturn(['status' => 'already_queued']);
+        $autoTopupService->shouldReceive('processUsage')->once()->with((string) $simcard->id)->andReturn(['status' => 'disabled']);
+        $virtualQuotaService->shouldReceive('processStoredUsage')->once()->with((string) $simcard->id)->andReturn(['status' => 'not_capped']);
+        $actionLinks->shouldReceive('createTopupUrl')->twice()->andReturn('https://data.example.test/topup');
+        $provider->shouldReceive('queryEsim')->twice()->andReturn([]);
+        $provider->shouldReceive('sendSms')->once()->andReturn(['success' => true]);
+        Notification::shouldReceive('send')
+            ->once()
+            ->with(Mockery::on(static function (NotificationEvent $event): bool {
+                $payload = $event->toArray();
+
+                return ($payload['event_name'] ?? null) === 'esim_low_data'
+                    && ($payload['email'] ?? null) === 'retail@example.com';
+            }));
+
+        $result = $service->handle($this->dataUsagePayload());
+
+        self::assertSame('processed', $result['status']);
+        self::assertSame(['status' => 'sent'], $result['sms']);
+        self::assertSame('sent', $result['email']['status']);
+        self::assertSame('esim_low_data', $result['email']['event']);
+    }
+
+    public function test_variant_b_wholesale_customer_does_not_receive_any_email_even_when_address_is_stored(): void
+    {
+        [
+            $service,
+            $provider,
+            $simcard,
+            $marketingRefundOffer,
+            $actionLinks,
+            $autoTopupService,
+            $virtualQuotaService,
+        ] = $this->webhookServiceFor('wholesale_esim_42', 'wholesale@example.com');
+
+        $provider->shouldNotReceive('sendSms');
+        $provider->shouldNotReceive('queryEsim');
+        $marketingRefundOffer->shouldNotReceive('handleUsageDetected');
+        $actionLinks->shouldNotReceive('createTopupUrl');
+        $autoTopupService->shouldReceive('processUsage')->once()->with((string) $simcard->id)->andReturn(['status' => 'disabled']);
+        $virtualQuotaService->shouldReceive('processStoredUsage')->once()->with((string) $simcard->id)->andReturn(['status' => 'not_capped']);
+        Notification::shouldReceive('send')->never();
+
+        $result = $service->handle($this->dataUsagePayload());
+
+        self::assertSame('processed', $result['status']);
+        self::assertSame([
+            'status' => 'skipped',
+            'reason' => 'wholesale_simcard',
+        ], $result['sms']);
+        self::assertSame([
+            'status' => 'skipped',
+            'reason' => 'wholesale_simcard',
+        ], $result['email']);
+    }
+
     /**
-     * @return array{EsimaccessWebhookService, EsimProvider, Simcard}
+     * @return array{
+     *     EsimaccessWebhookService,
+     *     EsimProvider,
+     *     Simcard,
+     *     EsimMarketingRefundOfferService,
+     *     SimcardActionLinkService,
+     *     EsimAutoTopupService,
+     *     VirtualEsimQuotaService
+     * }
      */
-    private function webhookServiceFor(string $idempotencyKey): array
+    private function webhookServiceFor(string $idempotencyKey, ?string $email = null): array
     {
         config()->set('esim.crypto.hash_key', 'test-hash-key');
         config()->set('esim.crypto.master_key', 'test-master-key');
@@ -65,7 +145,9 @@ class WholesaleWebhookSmsIsolationTest extends TestCase
         $crypto = new EsimCryptoService;
         $provider = Mockery::mock(EsimProvider::class);
         $marketingRefundOffer = Mockery::mock(EsimMarketingRefundOfferService::class);
-        $marketingRefundOffer->shouldReceive('handleUsageDetected')->once()->andReturn(['status' => 'missing_email']);
+        $actionLinks = Mockery::mock(SimcardActionLinkService::class);
+        $autoTopupService = Mockery::mock(EsimAutoTopupService::class);
+        $virtualQuotaService = Mockery::mock(VirtualEsimQuotaService::class);
 
         $simcard = Simcard::create([
             'plan_id_hash' => hash('sha256', $idempotencyKey),
@@ -79,18 +161,30 @@ class WholesaleWebhookSmsIsolationTest extends TestCase
             'commerce_order_item_id' => 'e3792992-fbe0-418a-bf75-a265df11f31c',
             'commerce_unit' => 1,
             'idempotency_key' => $idempotencyKey,
+            'email_enc' => $email === null ? null : $crypto->encryptEmail($email),
+            'email_hash' => $email === null ? null : $crypto->deriveEmailHash($email),
+            'email_opt_in_at' => $email === null ? null : now(),
+            'email_source' => $email === null ? null : 'test',
         ]);
 
         $service = new EsimaccessWebhookService(
             $crypto,
             $provider,
-            Mockery::mock(SimcardActionLinkService::class),
+            $actionLinks,
             $marketingRefundOffer,
-            Mockery::mock(EsimAutoTopupService::class),
-            Mockery::mock(VirtualEsimQuotaService::class),
+            $autoTopupService,
+            $virtualQuotaService,
         );
 
-        return [$service, $provider, $simcard];
+        return [
+            $service,
+            $provider,
+            $simcard,
+            $marketingRefundOffer,
+            $actionLinks,
+            $autoTopupService,
+            $virtualQuotaService,
+        ];
     }
 
     /**
@@ -104,6 +198,23 @@ class WholesaleWebhookSmsIsolationTest extends TestCase
                 'orderNo' => 'provider-order-42',
                 'iccid' => '8945000000000000042',
                 'esimStatus' => 'IN_USE',
+            ],
+        ];
+    }
+
+    /**
+     * @return array{notifyType: string, content: array<string, int|string>}
+     */
+    private function dataUsagePayload(): array
+    {
+        return [
+            'notifyType' => 'DATA_USAGE',
+            'content' => [
+                'orderNo' => 'provider-order-42',
+                'iccid' => '8945000000000000042',
+                'totalVolume' => 1_000,
+                'orderUsage' => 900,
+                'remain' => 100,
             ],
         ];
     }

@@ -226,9 +226,11 @@ class EsimaccessWebhookService
         $simcardId = $this->nullableString($result['simcard_id'] ?? null);
         $simcard = $simcardId === null ? null : Simcard::find($simcardId);
 
-        if ($simcard !== null) {
-            $this->marketingRefundOffer->handleUsageDetected($simcard);
+        if ($simcard === null || $this->isWholesaleSimcard($simcard)) {
+            return;
         }
+
+        $this->marketingRefundOffer->handleUsageDetected($simcard);
     }
 
     private function handleHealthCheck(array $normalized, string $idempotencyKey): array
@@ -509,6 +511,13 @@ class EsimaccessWebhookService
             return [
                 'status' => 'skipped',
                 'reason' => 'missing_simcard',
+            ];
+        }
+
+        if ($this->isWholesaleSimcard($simcard)) {
+            return [
+                'status' => 'skipped',
+                'reason' => 'wholesale_simcard',
             ];
         }
 
