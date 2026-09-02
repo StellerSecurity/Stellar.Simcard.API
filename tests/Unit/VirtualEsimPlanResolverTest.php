@@ -3,8 +3,9 @@
 use App\Services\Esim\EsimProvider;
 use App\Services\VirtualEsimPlanResolver;
 use Mockery\MockInterface;
+use Tests\TestCase;
 
-uses(Tests\TestCase::class);
+uses(TestCase::class);
 
 function gib(int|float $gb): int
 {
@@ -59,6 +60,27 @@ it('resolves a 6GB 30-day virtual plan as an exact 3GB 15-day base plus matching
         ->and($recipe['delivered_duration_days'])->toBe(30);
 });
 
+it('adds a waiting duration entitlement when exact customer expiry is requested', function (): void {
+    /** @var EsimProvider&MockInterface $provider */
+    $provider = Mockery::mock(EsimProvider::class);
+    $resolver = new VirtualEsimPlanResolver($provider);
+
+    $recipe = $resolver->resolve([[
+        'package_code' => 'BASE_5_30',
+        'data_bytes' => gib(5),
+        'duration_days' => 30,
+    ]], gib(5), 20, true);
+
+    expect($recipe['duration_entitlement'])->toMatchArray([
+        'enforced' => true,
+        'target_duration_days' => 20,
+        'entitled_duration_days' => 20,
+        'state' => 'WAITING_FOR_ACTIVATION',
+        'customer_expires_at' => null,
+        'paid_topup_session_ids' => [],
+    ]);
+});
+
 it('supports mixed topup packages and remains generic across virtual sizes', function (): void {
     /** @var EsimProvider&MockInterface $provider */
     $provider = Mockery::mock(EsimProvider::class);
@@ -107,7 +129,6 @@ it('supports mixed topup packages and remains generic across virtual sizes', fun
         ->and($recipe['delivered_data_bytes'])->toBe(gib(8))
         ->and($recipe['delivered_duration_days'])->toBe(30);
 });
-
 
 it('resolves Denmark 12GB 30-day using exact data even when included topups extend validity', function (): void {
     /** @var EsimProvider&MockInterface $provider */

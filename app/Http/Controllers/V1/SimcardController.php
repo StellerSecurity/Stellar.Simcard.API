@@ -2,17 +2,17 @@
 
 namespace App\Http\Controllers\V1;
 
-use App\Exceptions\SimcardOwnershipConflictException;
 use App\Exceptions\SimcardOrderConflictException;
+use App\Exceptions\SimcardOwnershipConflictException;
 use App\Http\Controllers\Controller;
-use App\Services\SimcardService;
 use App\Services\EsimAutoTopupService;
+use App\Services\SimcardService;
 use App\Services\VirtualEsimFulfillmentService;
 use App\Services\VirtualEsimPlanResolver;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\ValidationException;
 use RuntimeException;
 use Throwable;
@@ -152,6 +152,7 @@ class SimcardController extends Controller
             'virtual_plan' => ['required', 'array'],
             'virtual_plan.target_data_bytes' => ['required', 'integer', 'min:1'],
             'virtual_plan.target_duration_days' => ['required', 'integer', 'min:1', 'max:3650'],
+            'virtual_plan.enforce_target_duration' => ['nullable', 'boolean'],
             'virtual_plan.candidates' => ['required', 'array', 'min:1', 'max:50'],
             'virtual_plan.candidates.*.package_code' => ['required', 'string', 'max:128'],
             'virtual_plan.candidates.*.data_bytes' => ['required', 'integer', 'min:1'],
@@ -172,6 +173,7 @@ class SimcardController extends Controller
                 candidates: (array) $virtual['candidates'],
                 targetDataBytes: (int) $virtual['target_data_bytes'],
                 targetDurationDays: (int) $virtual['target_duration_days'],
+                enforceTargetDuration: (bool) ($virtual['enforce_target_duration'] ?? false),
             );
         } catch (RuntimeException $exception) {
             $status = (int) $exception->getCode();
@@ -225,6 +227,7 @@ class SimcardController extends Controller
             'virtual_plan' => ['required', 'array'],
             'virtual_plan.target_data_bytes' => ['required', 'integer', 'min:1'],
             'virtual_plan.target_duration_days' => ['required', 'integer', 'min:1', 'max:3650'],
+            'virtual_plan.enforce_target_duration' => ['nullable', 'boolean'],
             'virtual_plan.candidates' => ['required', 'array', 'min:1', 'max:50'],
             'virtual_plan.candidates.*.package_code' => ['required', 'string', 'max:128'],
             'virtual_plan.candidates.*.data_bytes' => ['required', 'integer', 'min:1'],
@@ -253,6 +256,7 @@ class SimcardController extends Controller
                 targetDataBytes: (int) $virtual['target_data_bytes'],
                 targetDurationDays: (int) $virtual['target_duration_days'],
                 candidates: (array) $virtual['candidates'],
+                enforceTargetDuration: (bool) ($virtual['enforce_target_duration'] ?? false),
             );
         } catch (SimcardOwnershipConflictException $exception) {
             return $this->ownershipConflict($exception->getMessage());

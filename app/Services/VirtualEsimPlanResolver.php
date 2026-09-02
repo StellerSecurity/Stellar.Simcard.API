@@ -22,17 +22,23 @@ use Throwable;
 class VirtualEsimPlanResolver
 {
     private const MAX_TOPUPS = 10;
+
     private const FIXED_DATA_TYPE = 1;
+
     private const MIB = 1048576;
 
     public function __construct(private readonly EsimProvider $provider) {}
 
     /**
-     * @param array<int,array<string,mixed>> $candidates
+     * @param  array<int,array<string,mixed>>  $candidates
      * @return array<string,mixed>
      */
-    public function resolve(array $candidates, int $targetDataBytes, int $targetDurationDays): array
-    {
+    public function resolve(
+        array $candidates,
+        int $targetDataBytes,
+        int $targetDurationDays,
+        bool $enforceTargetDuration = false,
+    ): array {
         if ($targetDataBytes <= 0 || $targetDurationDays <= 0) {
             throw new RuntimeException('Virtual plan target data and duration must be positive.', 422);
         }
@@ -110,12 +116,12 @@ class VirtualEsimPlanResolver
             );
 
             if ($quotaFallback !== null) {
-                return $quotaFallback;
+                return $this->withDurationEntitlement($quotaFallback, $targetDurationDays, $enforceTargetDuration);
             }
 
             if ($lastRetryableException !== null) {
                 throw new RuntimeException(
-                    'Virtual plan resolution is temporarily unavailable: ' . $lastRetryableException->getMessage(),
+                    'Virtual plan resolution is temporarily unavailable: '.$lastRetryableException->getMessage(),
                     503,
                     $lastRetryableException,
                 );
@@ -152,11 +158,30 @@ class VirtualEsimPlanResolver
             return (int) ($right['base']['data_bytes'] ?? 0) <=> (int) ($left['base']['data_bytes'] ?? 0);
         });
 
-        return $solutions[0];
+        return $this->withDurationEntitlement($solutions[0], $targetDurationDays, $enforceTargetDuration);
+    }
+
+    /** @param array<string,mixed> $recipe */
+    private function withDurationEntitlement(array $recipe, int $targetDurationDays, bool $enforce): array
+    {
+        if (! $enforce) {
+            return $recipe;
+        }
+
+        $recipe['duration_entitlement'] = [
+            'enforced' => true,
+            'target_duration_days' => $targetDurationDays,
+            'entitled_duration_days' => $targetDurationDays,
+            'state' => 'WAITING_FOR_ACTIVATION',
+            'customer_expires_at' => null,
+            'paid_topup_session_ids' => [],
+        ];
+
+        return $recipe;
     }
 
     /**
-     * @param array<int,array<string,mixed>> $candidates
+     * @param  array<int,array<string,mixed>>  $candidates
      * @return array<int,array<string,mixed>>
      */
     private function normalizeCandidates(array $candidates, int $targetDataBytes, int $targetDurationDays): array
@@ -254,7 +279,7 @@ class VirtualEsimPlanResolver
                 continue;
             }
 
-            $dedupeKey = $lookupCode . '|' . $volume . '|' . $duration;
+            $dedupeKey = $lookupCode.'|'.$volume.'|'.$duration;
             if (isset($seen[$dedupeKey])) {
                 continue;
             }
@@ -280,7 +305,7 @@ class VirtualEsimPlanResolver
      * Unbounded-by-package, bounded-by-total-count exact composition search.
      * The provider currently allows at most 10 top-ups on one eSIM.
      *
-     * @param array<int,array<string,mixed>> $topups
+     * @param  array<int,array<string,mixed>>  $topups
      * @return array<int,array<string,mixed>>|null
      */
     private function findExactTopupCombination(array $topups, int $targetBytes, int $minimumAdditionalDays): ?array
@@ -341,7 +366,7 @@ class VirtualEsimPlanResolver
                     $items[] = $cleanOption;
 
                     $cost = (int) $state['cost'] + (int) ($option['provider_price_raw'] ?? 0);
-                    $key = $mib . ':' . $days;
+                    $key = $mib.':'.$days;
                     $existing = $next[$key] ?? null;
 
                     if (
@@ -396,7 +421,7 @@ class VirtualEsimPlanResolver
      * Provider usage reporting can lag, so enforcement is intentionally described as
      * best-effort rather than a byte-perfect network-side quota.
      *
-     * @param array<int,array<string,mixed>> $candidates
+     * @param  array<int,array<string,mixed>>  $candidates
      * @return array<string,mixed>|null
      */
     private function quotaCappedFallback(array $candidates, int $targetDataBytes, int $targetDurationDays): ?array
@@ -506,7 +531,7 @@ class VirtualEsimPlanResolver
      */
     private function topupCatalogForBase(string $packageCode): array
     {
-        $cacheKey = 'virtual-esim:topup-catalog:v1:' . hash('sha256', $packageCode);
+        $cacheKey = 'virtual-esim:topup-catalog:v1:'.hash('sha256', $packageCode);
         $cached = Cache::get($cacheKey);
 
         if (is_array($cached)) {

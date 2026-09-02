@@ -2,14 +2,15 @@
 
 namespace App\Services;
 
-use App\Exceptions\SimcardOwnershipConflictException;
 use App\Exceptions\SimcardOrderConflictException;
+use App\Exceptions\SimcardOwnershipConflictException;
 use App\Models\Simcard;
 use App\Services\Esim\EsimCryptoService;
 use App\Services\Esim\EsimMarketingRefundOfferService;
 use App\Services\Esim\EsimProvider;
 use App\Services\Esim\SimcardUserReferenceService;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -86,7 +87,7 @@ class SimcardService
             throw new RuntimeException('Daily/Unlimited eSIM duration storage is not migrated yet.', 503);
         }
 
-        return DB::transaction(function () use ($planIdHash, $userId, $accountRef, $packageCode, $planId, $email, $emailSource, $commerceOrderId, $commerceOrderItemId, $commerceUnit, $idempotencyKey, $virtualFulfillmentRecipe, $periodNum) {
+        return DB::transaction(function () use ($planIdHash, $userId, $packageCode, $planId, $email, $emailSource, $commerceOrderId, $commerceOrderItemId, $commerceUnit, $idempotencyKey, $virtualFulfillmentRecipe, $periodNum) {
             // If Commerce retries the same paid order item, do not create a second provider order.
             $existing = $this->findExistingSimcardForOrderRequest(
                 planIdHash: $planIdHash,
@@ -112,7 +113,7 @@ class SimcardService
 
                 if ($virtualFulfillmentRecipe !== null) {
                     if (! hash_equals((string) $existing->package_code, $packageCode)) {
-                        throw new \RuntimeException(
+                        throw new RuntimeException(
                             'Existing eSIM package does not match the locked virtual-plan base package.',
                             409,
                         );
@@ -141,23 +142,23 @@ class SimcardService
             $externalOrderIdHash = $this->crypto->deriveExternalOrderHash($order->externalOrderId);
 
             $attributes = [
-                'id'                    => (string) Str::uuid(),
-                'plan_id_hash'          => $planIdHash,
-                'provider'              => 'esimaccess',
-                'provider_account'      => 'primary',
-                'package_code'          => $packageCode,
-                'external_order_id_enc'  => $externalOrderIdEnc,
+                'id' => (string) Str::uuid(),
+                'plan_id_hash' => $planIdHash,
+                'provider' => 'esimaccess',
+                'provider_account' => 'primary',
+                'package_code' => $packageCode,
+                'external_order_id_enc' => $externalOrderIdEnc,
                 'external_order_id_hash' => $externalOrderIdHash,
-                'state'                  => 'pending',
-                'user_ref'               => $userId !== null ? $this->userReferences->derive($userId) : null,
-                'user_ref_version'       => $userId !== null ? $this->userReferences->currentVersion() : null,
-                'user_linked_at'         => $userId !== null ? now() : null,
-                'user_link_source'       => $userId !== null ? 'purchase' : null,
-                'commerce_order_id'      => $commerceOrderId,
+                'state' => 'pending',
+                'user_ref' => $userId !== null ? $this->userReferences->derive($userId) : null,
+                'user_ref_version' => $userId !== null ? $this->userReferences->currentVersion() : null,
+                'user_linked_at' => $userId !== null ? now() : null,
+                'user_link_source' => $userId !== null ? 'purchase' : null,
+                'commerce_order_id' => $commerceOrderId,
                 'commerce_order_item_id' => $commerceOrderItemId,
-                'commerce_unit'          => $commerceUnit,
-                'idempotency_key'        => $idempotencyKey,
-                'purchased_on'           => now(),
+                'commerce_unit' => $commerceUnit,
+                'idempotency_key' => $idempotencyKey,
+                'purchased_on' => now(),
             ];
 
             // Keep fixed-plan deploys independent from the new migration. The
@@ -226,7 +227,7 @@ class SimcardService
 
         $simcard = Simcard::where('plan_id_hash', $planIdHash)->first();
 
-        if (!$simcard) {
+        if (! $simcard) {
             return null;
         }
 
@@ -235,7 +236,6 @@ class SimcardService
             $simcard->external_order_id_enc
         );
 
-
         $provider = $this->provider->queryOrder($externalOrderId, $this->preferredProviderAccount($simcard));
 
         // Extract the first eSIM entry if present.
@@ -243,16 +243,16 @@ class SimcardService
 
         // Build the safe usage/status payload plus the installation payload.
         $safeProvider = [
-            'expires_at'      => $esim['expiredTime'] ?? null,
-            'total_bytes'     => $esim['totalVolume'] ?? null,
-            'used_bytes'      => $esim['orderUsage'] ?? null,
+            'expires_at' => $esim['expiredTime'] ?? null,
+            'total_bytes' => $esim['totalVolume'] ?? null,
+            'used_bytes' => $esim['orderUsage'] ?? null,
             'remaining_bytes' => (isset($esim['totalVolume'], $esim['orderUsage']) && is_numeric($esim['totalVolume']) && is_numeric($esim['orderUsage']))
                 ? max(0, (int) $esim['totalVolume'] - (int) $esim['orderUsage'])
                 : null,
-            'esim_status'     => $esim['esimStatus'] ?? null,
-            'smdp_status'     => $esim['smdpStatus'] ?? null,
-            'esim_tran_no'    => $esim['esimTranNo'] ?? null,
-            'location_codes'  => $esim['packageList'][0]['locationCode'] ?? null,
+            'esim_status' => $esim['esimStatus'] ?? null,
+            'smdp_status' => $esim['smdpStatus'] ?? null,
+            'esim_tran_no' => $esim['esimTranNo'] ?? null,
+            'location_codes' => $esim['packageList'][0]['locationCode'] ?? null,
         ];
 
         $effectiveUsage = $this->virtualQuotaService->effectiveUsage(
@@ -277,12 +277,33 @@ class SimcardService
         if ($isInUse || $hasUsage) {
             $this->marketingRefundOffer->handleUsageDetected($simcard);
             $simcard->refresh();
+
+            if ($simcard->activated_at === null) {
+                $simcard->activated_at = now();
+                $simcard->state = 'active';
+                $simcard->save();
+            }
+
+            try {
+                $this->virtualQuotaService->processDurationStored((string) $simcard->id);
+            } catch (Throwable $exception) {
+                Log::warning('Virtual eSIM duration processing failed during status refresh.', [
+                    'simcard_id' => (string) $simcard->id,
+                    'exception' => class_basename($exception),
+                ]);
+            }
+            $simcard->refresh();
+        }
+
+        if ($this->virtualQuotaService->isDurationCapped($simcard)) {
+            $safeProvider['expires_at'] = $this->virtualQuotaService->effectiveExpiresAt($simcard)?->toIso8601String();
+            $safeProvider['remaining_validity'] = $this->virtualQuotaService->effectiveRemainingValidityDays($simcard);
         }
 
         return [
-            'simcard'  => $simcard->fresh(),
+            'simcard' => $simcard->fresh(),
             'provider' => $safeProvider,
-            'install'  => $install,
+            'install' => $install,
         ];
     }
 
@@ -543,6 +564,8 @@ class SimcardService
             is_numeric($simcard->order_usage) ? (int) $simcard->order_usage : null,
             is_numeric($simcard->remaining_volume) ? (int) $simcard->remaining_volume : null,
         );
+        $effectiveExpiry = $this->virtualQuotaService->effectiveExpiresAt($simcard);
+        $effectiveRemainingValidity = $this->virtualQuotaService->effectiveRemainingValidityDays($simcard);
 
         // Installation credentials are deliberately excluded from account listings.
         // They can only be decrypted by the explicit plan_id possession-proof query.
@@ -563,8 +586,8 @@ class SimcardService
             'total_bytes' => $effectiveUsage['total_bytes'],
             'used_bytes' => $effectiveUsage['used_bytes'],
             'remaining_bytes' => $effectiveUsage['remaining_bytes'],
-            'remaining_validity' => $simcard->remaining_validity,
-            'expires_at' => $simcard->expires_at?->toIso8601String(),
+            'remaining_validity' => $effectiveRemainingValidity,
+            'expires_at' => $effectiveExpiry?->toIso8601String(),
             'activated_at' => $simcard->activated_at?->toIso8601String(),
             'purchased_on' => $simcard->purchased_on?->toIso8601String(),
         ];
@@ -669,7 +692,7 @@ class SimcardService
     /** Decrypt customer email for notification sending. Never expose this in normal API responses. */
     public function decryptSimcardEmail(Simcard $simcard): ?string
     {
-        if (!$simcard->email_enc) {
+        if (! $simcard->email_enc) {
             return null;
         }
 

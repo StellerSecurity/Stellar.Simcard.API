@@ -21,8 +21,9 @@ class VirtualEsimFulfillmentService
      * Provider top-up calls are deliberately never executed in this HTTP flow.
      * Commerce can continue delivery immediately after the BASE eSIM is ready.
      *
-     * @param array<int,array<string,mixed>> $candidates
+     * @param  array<int,array<string,mixed>>  $candidates
      * @return array{simcard: Simcard, install: array<string,mixed>, virtual_fulfillment: array<string,mixed>}
+     *
      * @throws SimcardOwnershipConflictException
      */
     public function orderAndCompose(
@@ -37,6 +38,7 @@ class VirtualEsimFulfillmentService
         int $targetDurationDays,
         array $candidates,
         ?array $lockedRecipe = null,
+        bool $enforceTargetDuration = false,
     ): array {
         // A recipe is locked on the Simcard record before/with provider creation.
         // Retries must reuse it verbatim; changing BASE/TOPUP composition after one
@@ -47,12 +49,12 @@ class VirtualEsimFulfillmentService
             : null;
 
         if ($storedRecipe !== null) {
-            $recipe = $this->validateLockedRecipe($storedRecipe, $targetDataBytes, $targetDurationDays);
+            $recipe = $this->validateLockedRecipe($storedRecipe, $targetDataBytes, $targetDurationDays, $enforceTargetDuration);
         } elseif ($lockedRecipe !== null) {
             // Support replacement reuses the exact original recipe. Never re-resolve a
             // replacement against a changed provider catalog and accidentally alter the
             // customer's purchased data/validity composition.
-            $recipe = $this->validateLockedRecipe($lockedRecipe, $targetDataBytes, $targetDurationDays);
+            $recipe = $this->validateLockedRecipe($lockedRecipe, $targetDataBytes, $targetDurationDays, $enforceTargetDuration);
         } else {
             // Resolve BEFORE spending provider balance. Exact BASE+TOPUP composition
             // is preferred; otherwise the resolver may select a larger BASE protected
@@ -61,8 +63,9 @@ class VirtualEsimFulfillmentService
                 candidates: $candidates,
                 targetDataBytes: $targetDataBytes,
                 targetDurationDays: $targetDurationDays,
+                enforceTargetDuration: $enforceTargetDuration,
             );
-            $recipe = $this->validateLockedRecipe($recipe, $targetDataBytes, $targetDurationDays);
+            $recipe = $this->validateLockedRecipe($recipe, $targetDataBytes, $targetDurationDays, $enforceTargetDuration);
         }
 
         $recipeTopups = array_values((array) ($recipe['topups'] ?? []));
@@ -109,7 +112,7 @@ class VirtualEsimFulfillmentService
         $persistedRecipe = is_array($simcard->virtual_fulfillment_recipe)
             ? $simcard->virtual_fulfillment_recipe
             : $recipe;
-        $recipe = $this->validateLockedRecipe($persistedRecipe, $targetDataBytes, $targetDurationDays);
+        $recipe = $this->validateLockedRecipe($persistedRecipe, $targetDataBytes, $targetDurationDays, $enforceTargetDuration);
 
         if ($recipeTopups === []) {
             $recipe['fulfilled_topups'] = [];
@@ -126,7 +129,7 @@ class VirtualEsimFulfillmentService
                     : [];
                 $recipe['quota'] = $quota;
                 $recipe['status'] = in_array($quota['state'], ['SUSPENDED', 'SUSPEND_QUEUED', 'SUSPENDING'], true)
-                    ? 'QUOTA_' . $quota['state']
+                    ? 'QUOTA_'.$quota['state']
                     : 'QUOTA_MONITORING';
                 $recipe['base_provisioned_at'] = $recipe['base_provisioned_at'] ?? now()->toIso8601String();
             } else {
@@ -375,7 +378,7 @@ class VirtualEsimFulfillmentService
     private function assertAsyncQueueConfigured(): void
     {
         $connection = trim((string) config('esim.virtual_fulfillment.connection', 'database'));
-        $driver = strtolower(trim((string) config('queue.connections.' . $connection . '.driver', '')));
+        $driver = strtolower(trim((string) config('queue.connections.'.$connection.'.driver', '')));
 
         if (! in_array($driver, ['database', 'redis', 'sqs', 'beanstalkd', 'failover'], true)) {
             throw new RuntimeException(
@@ -386,8 +389,12 @@ class VirtualEsimFulfillmentService
     }
 
     /** @return array<string,mixed> */
-    private function validateLockedRecipe(array $recipe, int $targetDataBytes, int $targetDurationDays): array
-    {
+    private function validateLockedRecipe(
+        array $recipe,
+        int $targetDataBytes,
+        int $targetDurationDays,
+        bool $enforceTargetDuration = false,
+    ): array {
         $strategy = trim((string) ($recipe['strategy'] ?? ''));
         $basePackageCode = trim((string) data_get($recipe, 'base.package_code', ''));
         $deliveredBytes = data_get($recipe, 'delivered_data_bytes');
@@ -409,6 +416,13 @@ class VirtualEsimFulfillmentService
 
         if ($commonInvalid) {
             throw new RuntimeException('Stored virtual-plan fulfillment recipe does not match the advertised target or minimum validity.', 409);
+        }
+
+        if ($enforceTargetDuration && (
+            ! filter_var(data_get($recipe, 'duration_entitlement.enforced', false), FILTER_VALIDATE_BOOLEAN)
+            || (int) data_get($recipe, 'duration_entitlement.target_duration_days', 0) !== $targetDurationDays
+        )) {
+            throw new RuntimeException('Stored virtual-plan recipe is missing the enforced customer duration entitlement.', 409);
         }
 
         if ($strategy === 'base_plus_included_topups_v1') {
@@ -439,5 +453,4 @@ class VirtualEsimFulfillmentService
 
         throw new RuntimeException('Stored virtual-plan fulfillment recipe uses an unsupported strategy.', 409);
     }
-
 }

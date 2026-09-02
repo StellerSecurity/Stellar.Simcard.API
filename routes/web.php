@@ -27,7 +27,7 @@ Route::get('/', function () {
                     'output' => trim(Artisan::output()),
                 ]);
             }
-        } catch (\Throwable $exception) {
+        } catch (Throwable $exception) {
             Log::error('eSIM Auto Top-Up HTTP trigger failed.', [
                 'exception' => basename(str_replace('\\', '/', get_class($exception))),
             ]);
@@ -52,8 +52,17 @@ Route::get('/', function () {
                     'exit_code' => $exitCode,
                     'output' => trim(Artisan::output()),
                 ]);
+
+                $durationExitCode = Artisan::call('esim:process-virtual-duration-caps', [
+                    '--limit' => 500,
+                ]);
+
+                Log::info('Virtual eSIM duration processor executed from HTTP trigger.', [
+                    'exit_code' => $durationExitCode,
+                    'output' => trim(Artisan::output()),
+                ]);
             }
-        } catch (\Throwable $exception) {
+        } catch (Throwable $exception) {
             Log::error('Virtual eSIM quota HTTP trigger failed.', [
                 'exception' => basename(str_replace('\\', '/', get_class($exception))),
             ]);
@@ -96,7 +105,7 @@ Route::get('/', function () {
                     'output' => trim(Artisan::output()),
                 ]);
             }
-        } catch (\Throwable $exception) {
+        } catch (Throwable $exception) {
             Log::error('Virtual eSIM HTTP queue worker failed.', [
                 'exception' => basename(str_replace('\\', '/', get_class($exception))),
             ]);
@@ -106,7 +115,6 @@ Route::get('/', function () {
             }
         }
     });
-
 
     return response('stellarsimcardapiprod', 200)
         ->header('Content-Type', 'text/plain');

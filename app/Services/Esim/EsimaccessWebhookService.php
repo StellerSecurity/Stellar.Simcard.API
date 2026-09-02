@@ -113,10 +113,10 @@ class EsimaccessWebhookService
                 $event->simcard_id = $simcard->id;
                 $applied = $this->applyToSimcard($simcard, $notifyType, $content);
 
-                if (!$applied) {
+                if (! $applied) {
                     $event->status = 'ignored';
                     $event->error_code = 'notify_type_not_mutated';
-                    $event->error_message = 'Webhook type intentionally did not mutate simcard state, type: ' . $notifyType;
+                    $event->error_message = 'Webhook type intentionally did not mutate simcard state, type: '.$notifyType;
                     $event->processed_at = now();
                     $event->save();
 
@@ -202,6 +202,24 @@ class EsimaccessWebhookService
                 $this->refreshValidityNotificationLifecycle($content, $result);
             }
 
+            if ($notifyType === 'ESIM_STATUS' && ! empty($result['simcard_id'])) {
+                try {
+                    // First use anchors an enforced virtual duration. Persist the
+                    // exact customer deadline immediately; the minute scheduler is
+                    // still the durable fallback if this trigger cannot run.
+                    $result['virtual_duration'] = $this->virtualQuotaService->processDurationStored((string) $result['simcard_id']);
+                } catch (Throwable $exception) {
+                    Log::warning('Virtual eSIM duration initialization failed after ESIM_STATUS webhook.', [
+                        'simcard_id' => (string) $result['simcard_id'],
+                        'exception' => $this->safeExceptionName($exception),
+                    ]);
+                    $result['virtual_duration'] = [
+                        'status' => 'retryable',
+                        'reason' => 'trigger_processing_failed',
+                    ];
+                }
+            }
+
             $sms = $this->sendWebhookSmsIfNeeded($notifyType, $content, $result);
 
             if ($sms !== null) {
@@ -226,7 +244,7 @@ class EsimaccessWebhookService
         $usageDetected = ($notifyType === 'ESIM_STATUS' && $esimStatus === 'IN_USE')
             || ($notifyType === 'DATA_USAGE' && $orderUsage !== null && $orderUsage > 0);
 
-        if (!$usageDetected) {
+        if (! $usageDetected) {
             return;
         }
 
@@ -278,7 +296,7 @@ class EsimaccessWebhookService
 
         $notifyType = strtoupper($notifyType);
 
-        if (!in_array($notifyType, self::SUPPORTED_NOTIFY_TYPES, true)) {
+        if (! in_array($notifyType, self::SUPPORTED_NOTIFY_TYPES, true)) {
             throw new RuntimeException('Unsupported notifyType.');
         }
 
@@ -289,7 +307,7 @@ class EsimaccessWebhookService
             $content = is_array($decoded) ? $decoded : [];
         }
 
-        if (!is_array($content)) {
+        if (! is_array($content)) {
             $content = [];
         }
 
@@ -545,19 +563,18 @@ class EsimaccessWebhookService
             $url = $this->actionLinks->createTopupUrl($simcard, 'data_low', $webhookEventId);
             $planPhrase = $this->safePlanPhraseForSms($content, $simcard);
 
-            return 'Your Stellar eSIM' . $planPhrase . ' is almost out of data. Top up here: ' . $url;
+            return 'Your Stellar eSIM'.$planPhrase.' is almost out of data. Top up here: '.$url;
         }
 
         if ($notifyType === 'VALIDITY_USAGE') {
             $url = $this->actionLinks->createTopupUrl($simcard, 'validity_expiring', $webhookEventId);
             $planPhrase = $this->safePlanPhraseForSms($content, $simcard);
 
-            return 'Your Stellar eSIM' . $planPhrase . ' expires soon. Extend or buy another plan here: ' . $url;
+            return 'Your Stellar eSIM'.$planPhrase.' expires soon. Extend or buy another plan here: '.$url;
         }
 
         return null;
     }
-
 
     private function sendWebhookEmailIfNeeded(string $notifyType, array $content, array $result): ?array
     {
@@ -610,7 +627,7 @@ class EsimaccessWebhookService
 
         $event = $emailPayload['event'];
         $payload = $emailPayload['payload'];
-        $idempotencyKey = 'esim_webhook_email_' . ($webhookEventId ?: hash('sha256', json_encode([$notifyType, $content]))) . '_' . $event;
+        $idempotencyKey = 'esim_webhook_email_'.($webhookEventId ?: hash('sha256', json_encode([$notifyType, $content]))).'_'.$event;
 
         try {
             Notification::send(
@@ -747,7 +764,7 @@ class EsimaccessWebhookService
 
         $email = $this->crypto->normalizeEmail($email);
 
-        if ($email === null || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        if ($email === null || ! filter_var($email, FILTER_VALIDATE_EMAIL)) {
             return null;
         }
 
@@ -758,7 +775,7 @@ class EsimaccessWebhookService
     {
         $label = $this->resolveSafePackageLabelForSms($content, $simcard);
 
-        return $label === null ? '' : ' for ' . $label;
+        return $label === null ? '' : ' for '.$label;
     }
 
     private function resolveSafePackageLabelForSms(array $content, Simcard $simcard): ?string
@@ -817,13 +834,13 @@ class EsimaccessWebhookService
     {
         $esim = Arr::get($response, 'obj.esimList.0');
 
-        if (!is_array($esim)) {
+        if (! is_array($esim)) {
             return null;
         }
 
         $package = Arr::get($esim, 'packageList.0');
 
-        if (!is_array($package)) {
+        if (! is_array($package)) {
             return null;
         }
 
@@ -888,6 +905,7 @@ class EsimaccessWebhookService
         foreach ($value as $key => $item) {
             if ($this->isSensitivePayloadKey((string) $key)) {
                 $redacted[$key] = self::REDACTED;
+
                 continue;
             }
 

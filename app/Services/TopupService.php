@@ -8,6 +8,7 @@ use App\Models\SimcardTopupSession;
 use App\Services\Esim\EsimCryptoService;
 use App\Services\Esim\EsimProvider;
 use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -19,9 +20,13 @@ use Throwable;
 class TopupService
 {
     private const ACTION_TOPUP = 'topup';
+
     private const STATUS_PENDING_PAYMENT = 'PENDING_PAYMENT';
+
     private const STATUS_PAID = 'PAID';
+
     private const STATUS_FULFILLED = 'FULFILLED';
+
     private const STATUS_FAILED = 'FAILED';
 
     public function __construct(
@@ -30,7 +35,6 @@ class TopupService
         private readonly SimcardActionLinkService $actionLinks,
         private readonly VirtualEsimQuotaService $virtualQuotaService,
     ) {}
-
 
     public function createToken(string $simId, string $reason = 'app_requested'): array
     {
@@ -75,7 +79,7 @@ class TopupService
         $this->assertTopupEligible($simcard);
 
         $providerPlans = $this->listPlansForResolve($simcard, $iccid);
-        $currentPlan = $this->currentPlanForSimcard($simcard);
+        $currentPlan = $this->customerCurrentPlan($simcard, $this->currentPlanForSimcard($simcard));
 
         $normalizedPlans = $this->normalizeTopupPlans($providerPlans);
 
@@ -325,7 +329,7 @@ class TopupService
         }
 
         $packageCode = $this->normalizePackageCode((string) ($matchedPlan['package_code'] ?? ''));
-        $sessionIdempotencyKey = hash('sha256', 'simcard-auto-topup-session|' . $attemptKey);
+        $sessionIdempotencyKey = hash('sha256', 'simcard-auto-topup-session|'.$attemptKey);
 
         return DB::transaction(function () use (
             $simcard,
@@ -347,7 +351,7 @@ class TopupService
                 return $existing;
             }
 
-            $session = new SimcardTopupSession();
+            $session = new SimcardTopupSession;
             $session->id = (string) Str::uuid();
             $session->simcard_id = (string) $simcard->id;
             $session->action_link_id = null;
@@ -457,7 +461,7 @@ class TopupService
                 return $existing;
             }
 
-            $session = new SimcardTopupSession();
+            $session = new SimcardTopupSession;
             $session->id = (string) Str::uuid();
             $session->simcard_id = (string) $simcard->id;
             $session->action_link_id = null;
@@ -511,14 +515,14 @@ class TopupService
             throw new RuntimeException('Top-up eSIM could not be found.', 404);
         }
 
-        $restoredQuotaProfileForPaidTopup = false;
+        $restoredEntitlementProfileForPaidTopup = false;
 
         if ($this->isIncludedVirtualTopupSession($session)) {
             $this->assertIncludedVirtualTopupEligible($simcard);
         } else {
             if ($this->virtualQuotaService->allowsPaidTopupWhileSuspended($simcard)) {
                 $this->virtualQuotaService->restoreForPaidTopup($simcard);
-                $restoredQuotaProfileForPaidTopup = true;
+                $restoredEntitlementProfileForPaidTopup = true;
                 $simcard->refresh();
             }
 
@@ -566,7 +570,7 @@ class TopupService
                     $session->paid_at = $session->paid_at ?: now();
                     $session->supplier_reference = null;
                     $session->fulfilled_at = null;
-                    $session->failure_reason = 'Retryable top-up fulfillment error: ' . $failureReason;
+                    $session->failure_reason = 'Retryable top-up fulfillment error: '.$failureReason;
                     $session->meta = array_merge((array) $session->meta, [
                         'provider_result_redacted' => $redactedProviderResponse,
                         'provider_transaction_id' => $transactionId,
@@ -621,6 +625,7 @@ class TopupService
 
             if (! $this->isIncludedVirtualTopupSession($session)) {
                 $this->virtualQuotaService->extendEntitlementForPaidTopup($simcard->fresh() ?? $simcard, $session);
+                $this->virtualQuotaService->extendDurationEntitlementForPaidTopup($simcard->fresh() ?? $simcard, $session);
             }
 
             return [
@@ -635,14 +640,24 @@ class TopupService
             // the stored usage immediately; this queues the dedicated quota suspend
             // job again when the previous entitlement is still exhausted. A later
             // idempotent top-up retry can extend entitlement and restore the profile.
-            if ($restoredQuotaProfileForPaidTopup) {
+            if ($restoredEntitlementProfileForPaidTopup) {
                 try {
                     $this->virtualQuotaService->processStoredUsage((string) $simcard->id);
                 } catch (Throwable $quotaException) {
-                    Log::warning('Quota-capped eSIM could not be re-queued for suspension after paid top-up failure.', [
+                    Log::warning('Virtual eSIM could not be re-queued for quota suspension after paid top-up failure.', [
                         'simcard_id' => (string) $simcard->id,
                         'topup_session_id' => (string) $session->id,
                         'exception' => basename(str_replace('\\', '/', get_class($quotaException))),
+                    ]);
+                }
+
+                try {
+                    $this->virtualQuotaService->processDurationStored((string) $simcard->id);
+                } catch (Throwable $durationException) {
+                    Log::warning('Virtual eSIM could not be re-queued for duration suspension after paid top-up failure.', [
+                        'simcard_id' => (string) $simcard->id,
+                        'topup_session_id' => (string) $session->id,
+                        'exception' => basename(str_replace('\\', '/', get_class($durationException))),
                     ]);
                 }
             }
@@ -661,7 +676,7 @@ class TopupService
             ) {
                 // Do not permanently fail paid top-ups on provider/network timeouts.
                 // Commerce can retry with the same provider transaction id.
-                $session->failure_reason = 'Retryable top-up fulfillment error: ' . $exception->getMessage();
+                $session->failure_reason = 'Retryable top-up fulfillment error: '.$exception->getMessage();
                 $session->meta = array_merge((array) $session->meta, [
                     'provider_transaction_id' => $transactionId,
                     'last_retryable_error' => $exception->getMessage(),
@@ -676,7 +691,7 @@ class TopupService
                     'exception' => basename(str_replace('\\', '/', get_class($exception))),
                 ]);
 
-                throw new RuntimeException('Top-up fulfillment temporarily unavailable: ' . $exception->getMessage(), 503);
+                throw new RuntimeException('Top-up fulfillment temporarily unavailable: '.$exception->getMessage(), 503);
             }
 
             $session->status = self::STATUS_FAILED;
@@ -705,7 +720,7 @@ class TopupService
                 throw new RuntimeException('The provider rejected the top-up.', 422, $exception);
             }
 
-            throw new RuntimeException('Top-up fulfillment failed: ' . $exception->getMessage(), 502, $exception);
+            throw new RuntimeException('Top-up fulfillment failed: '.$exception->getMessage(), 502, $exception);
         }
     }
 
@@ -855,6 +870,7 @@ class TopupService
         $totalBytes = is_numeric($simcard->total_volume) && (int) $simcard->total_volume > 0
             ? (int) $simcard->total_volume
             : null;
+        $remainingValidity = $this->virtualQuotaService->effectiveRemainingValidityDays($simcard);
 
         return array_filter([
             'package_code' => $packageCode,
@@ -864,10 +880,48 @@ class TopupService
             'package_name' => $packageCode,
             'data_bytes' => $totalBytes,
             'data_gb' => $this->bytesToGb($totalBytes),
-            'duration_days' => $simcard->remaining_validity,
-            'validity_days' => $simcard->remaining_validity,
+            'duration_days' => $remainingValidity,
+            'validity_days' => $remainingValidity,
             'currency' => 'EUR',
         ], static fn ($value) => $value !== null && $value !== '');
+    }
+
+    /** @param array<string,mixed>|null $plan */
+    private function customerCurrentPlan(Simcard $simcard, ?array $plan): ?array
+    {
+        if ($plan === null || ! $this->virtualQuotaService->isDurationCapped($simcard)) {
+            return $plan;
+        }
+
+        $days = (int) (data_get(
+            $simcard->virtual_fulfillment_recipe,
+            'duration_entitlement.entitled_duration_days',
+        ) ?? data_get(
+            $simcard->virtual_fulfillment_recipe,
+            'duration_entitlement.target_duration_days',
+        ) ?? 0);
+
+        if ($days <= 0) {
+            return $plan;
+        }
+
+        $providerDays = (int) ($plan['duration_days'] ?? $plan['validity_days'] ?? 0);
+        $plan['duration_days'] = $days;
+        $plan['validity_days'] = $days;
+
+        if ($providerDays > 0 && $providerDays !== $days) {
+            foreach (['name', 'package_name'] as $key) {
+                if (is_string($plan[$key] ?? null)) {
+                    $plan[$key] = preg_replace(
+                        '/\b'.preg_quote((string) $providerDays, '/').'\s*[- ]?days?\b/i',
+                        $days.' Days',
+                        (string) $plan[$key],
+                    );
+                }
+            }
+        }
+
+        return $plan;
     }
 
     private function createOrReuseTopupSession(
@@ -896,7 +950,7 @@ class TopupService
                 return $existing;
             }
 
-            $session = new SimcardTopupSession();
+            $session = new SimcardTopupSession;
             $session->id = (string) Str::uuid();
             $session->simcard_id = $simcard->id;
             $session->action_link_id = $link->id;
@@ -989,7 +1043,7 @@ class TopupService
                 return [$existing, false];
             }
 
-            $session = new SimcardTopupSession();
+            $session = new SimcardTopupSession;
             $session->id = (string) Str::uuid();
             $session->simcard_id = $simcard->id;
             $session->action_link_id = $link->id;
@@ -1213,7 +1267,7 @@ class TopupService
 
     private function providerExceptionHttpStatus(Throwable $exception): int
     {
-        if ($exception instanceof \Illuminate\Http\Client\RequestException && $exception->response !== null) {
+        if ($exception instanceof RequestException && $exception->response !== null) {
             return $exception->response->status();
         }
 
@@ -1225,19 +1279,19 @@ class TopupService
         $message = strtolower($exception->getMessage());
 
         foreach ([
-                     'curl error 28',
-                     'connection timeout',
-                     'operation timed out',
-                     'timeout was reached',
-                     'failed to connect',
-                     'could not resolve host',
-                     'connection refused',
-                     'connection reset',
-                     'temporary failure',
-                     'temporarily unavailable',
-                     'service unavailable',
-                     'http 503',
-                 ] as $needle) {
+            'curl error 28',
+            'connection timeout',
+            'operation timed out',
+            'timeout was reached',
+            'failed to connect',
+            'could not resolve host',
+            'connection refused',
+            'connection reset',
+            'temporary failure',
+            'temporarily unavailable',
+            'service unavailable',
+            'http 503',
+        ] as $needle) {
             if (str_contains($message, $needle)) {
                 return true;
             }
@@ -1360,7 +1414,6 @@ class TopupService
 
         return $token;
     }
-
 
     private function findSimcardForTopupSimId(string $simId): ?Simcard
     {
@@ -1509,8 +1562,8 @@ class TopupService
             'total_data' => $this->formatBytes($effectiveUsage['total_bytes']),
             'used_bytes' => $effectiveUsage['used_bytes'],
             'used_data' => $this->formatBytes($effectiveUsage['used_bytes']),
-            'remaining_validity_days' => $simcard->remaining_validity,
-            'expires_at' => optional($simcard->expires_at)->toISOString(),
+            'remaining_validity_days' => $this->virtualQuotaService->effectiveRemainingValidityDays($simcard),
+            'expires_at' => $this->virtualQuotaService->effectiveExpiresAt($simcard)?->toISOString(),
             'activated_at' => optional($simcard->activated_at)->toISOString(),
         ];
 
@@ -1931,16 +1984,16 @@ class TopupService
     private function extractSupplierReference(array $payload): ?string
     {
         foreach ([
-                     'obj.topUpEsimTranNo',
-                     'data.topUpEsimTranNo',
-                     'topUpEsimTranNo',
-                     'obj.orderNo',
-                     'data.orderNo',
-                     'orderNo',
-                     'obj.transactionId',
-                     'data.transactionId',
-                     'transactionId',
-                 ] as $key) {
+            'obj.topUpEsimTranNo',
+            'data.topUpEsimTranNo',
+            'topUpEsimTranNo',
+            'obj.orderNo',
+            'data.orderNo',
+            'orderNo',
+            'obj.transactionId',
+            'data.transactionId',
+            'transactionId',
+        ] as $key) {
             $value = Arr::get($payload, $key);
 
             if (is_string($value) && trim($value) !== '') {
@@ -1979,7 +2032,7 @@ class TopupService
 
     private function providerTransactionId(SimcardTopupSession $session): string
     {
-        $transactionId = 'tu_' . Str::replace('-', '', (string) $session->id);
+        $transactionId = 'tu_'.Str::replace('-', '', (string) $session->id);
 
         return substr($transactionId, 0, 50);
     }
@@ -2016,7 +2069,7 @@ class TopupService
             ?? Arr::get($payload, 'obj.errorCode');
 
         if ($code !== null && trim((string) $code) !== '') {
-            return trim((string) $message) . ' [' . trim((string) $code) . ']';
+            return trim((string) $message).' ['.trim((string) $code).']';
         }
 
         return trim((string) $message);
@@ -2031,6 +2084,7 @@ class TopupService
 
             if (in_array($normalized, ['iccid', 'imsi', 'eid', 'msisdn', 'phone', 'phonenumber', 'activationcode', 'qrcode', 'matchingid', 'smdpaddress', 'token', 'secretkey', 'signature'], true)) {
                 $redacted[$key] = '[REDACTED]';
+
                 continue;
             }
 
@@ -2110,13 +2164,13 @@ class TopupService
         }
 
         if ($bytes >= 1024 * 1024 * 1024) {
-            return rtrim(rtrim(number_format($bytes / 1024 / 1024 / 1024, 2, '.', ''), '0'), '.') . ' GB';
+            return rtrim(rtrim(number_format($bytes / 1024 / 1024 / 1024, 2, '.', ''), '0'), '.').' GB';
         }
 
         if ($bytes >= 1024 * 1024) {
-            return rtrim(rtrim(number_format($bytes / 1024 / 1024, 2, '.', ''), '0'), '.') . ' MB';
+            return rtrim(rtrim(number_format($bytes / 1024 / 1024, 2, '.', ''), '0'), '.').' MB';
         }
 
-        return $bytes . ' bytes';
+        return $bytes.' bytes';
     }
 }

@@ -75,7 +75,7 @@ Artisan::command('esim:send-auto-topup-sms {attempt}', function () {
     $result = app(EsimAutoTopupService::class)
         ->sendSuccessSmsForAttempt((string) $this->argument('attempt'), true);
 
-    $this->info('SMS result: ' . $result);
+    $this->info('SMS result: '.$result);
 
     return $result === 'failed' ? 1 : 0;
 })->purpose('Send or retry the Auto Top-Up success SMS for one fulfilled attempt');
@@ -111,8 +111,6 @@ Schedule::command('esim:process-data-usage-alerts')
     ->everyFifteenMinutes()
     ->withoutOverlapping();
 
-
-
 Artisan::command('esim:process-virtual-quota-caps {--limit=100} {--simcard=} {--force : Ignore the normal quota polling interval}', function () {
     $summary = app(VirtualEsimQuotaService::class)->processPending(
         (int) $this->option('limit'),
@@ -136,6 +134,30 @@ Artisan::command('esim:process-virtual-quota-caps {--limit=100} {--simcard=} {--
 
 Schedule::command('esim:process-virtual-quota-caps --limit=100')
     ->everyFiveMinutes()
+    ->withoutOverlapping();
+
+Artisan::command('esim:process-virtual-duration-caps {--limit=500} {--simcard=}', function () {
+    $summary = app(VirtualEsimQuotaService::class)->processDurationPending(
+        (int) $this->option('limit'),
+        $this->option('simcard') !== null ? (string) $this->option('simcard') : null,
+    );
+
+    $this->info(sprintf(
+        'Processed: %d, monitoring: %d, waiting: %d, suspend queued: %d, suspended: %d, skipped: %d, failed: %d',
+        $summary['processed'],
+        $summary['monitoring'],
+        $summary['waiting'],
+        $summary['suspend_queued'],
+        $summary['suspended'],
+        $summary['skipped'],
+        $summary['failed'],
+    ));
+
+    return $summary['failed'] > 0 ? 1 : 0;
+})->purpose('Enforce exact customer validity for duration-capped virtual eSIM plans');
+
+Schedule::command('esim:process-virtual-duration-caps --limit=500')
+    ->everyMinute()
     ->withoutOverlapping();
 
 Artisan::command('esim:retry-wholesale-webhook-relays {--limit=100}', function () {
