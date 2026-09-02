@@ -80,7 +80,8 @@ stages:
           tests/Unit/EsimAutoTopupManagementPricingTest.php \
           tests/Unit/AutoTopupPaymentRecoverySecurityTest.php \
           tests/Feature/AutoTopupPaymentRecoveryEndpointTest.php \
-          tests/Feature/AutoTopupPaymentRecoveryStateTest.php
+          tests/Feature/AutoTopupPaymentRecoveryStateTest.php \
+          tests/Feature/WholesaleSupportInspectionTest.php
       workingDirectory: $(rootFolder)
       displayName: 'Verify migrations and Auto Top-Up recovery flows'
 

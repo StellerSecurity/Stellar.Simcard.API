@@ -41,12 +41,21 @@ class EsimSupportReplacementService
         $emailMatch = $simcard->email_hash !== null
             && hash_equals((string) $simcard->email_hash, $this->crypto->deriveEmailHash($email));
 
-        if (! $emailMatch) {
+        // Wholesale/reseller eSIMs are provisioned outside Stellar Commerce and
+        // therefore cannot match a retail purchase email. The private 16-digit
+        // plan ID is possession proof for read-only technical support, but it
+        // must never authorize automatic replacement or expose install secrets.
+        $wholesalePossessionVerified = ! $emailMatch
+            && trim((string) ($simcard->commerce_order_id ?? '')) === '';
+
+        if (! $emailMatch && ! $wholesalePossessionVerified) {
             // Do not disclose provider status or install credentials for an eSIM that
             // cannot be tied to the support sender.
             return [
                 'found' => true,
                 'email_match' => false,
+                'technical_support_verified' => false,
+                'support_identity_mode' => 'retail_email_mismatch',
                 'used_bytes' => null,
                 'eligible_to_replace' => false,
                 'blocked_reason' => 'OWNERSHIP_NOT_VERIFIED',
@@ -58,6 +67,7 @@ class EsimSupportReplacementService
 
         $query = $this->simcards->queryStatusByPlanId($planId);
         $provider = is_array($query['provider'] ?? null) ? $query['provider'] : [];
+        $install = is_array($query['install'] ?? null) ? $query['install'] : [];
         $usedBytes = is_numeric($provider['used_bytes'] ?? null) ? (int) $provider['used_bytes'] : null;
         $alreadyReplaced = SimcardSupportReplacement::query()
             ->where('old_simcard_id', $simcard->id)
@@ -81,6 +91,8 @@ class EsimSupportReplacementService
         return [
             'found' => true,
             'email_match' => $emailMatch,
+            'technical_support_verified' => $emailMatch || $wholesalePossessionVerified,
+            'support_identity_mode' => $emailMatch ? 'retail_email' : 'wholesale_sim_id_possession',
             'used_bytes' => $usedBytes,
             'eligible_to_replace' => $emailMatch
                 && $usedBytes === 0
@@ -90,7 +102,9 @@ class EsimSupportReplacementService
             'blocked_reason' => $blockedReason,
             'lifecycle' => $this->supportLifecycle($provider),
             'provider' => $provider,
-            'install' => is_array($query['install'] ?? null) ? $query['install'] : [],
+            'install' => $emailMatch
+                ? $install
+                : ['apn' => isset($install['apn']) ? (string) $install['apn'] : null],
             'plan' => [
                 'package_code' => (string) $simcard->package_code,
                 'period_num' => $simcard->provider_period_num !== null ? (int) $simcard->provider_period_num : null,
