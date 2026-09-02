@@ -409,15 +409,6 @@ class EsimaccessWebhookService
 
     private function sendWebhookSmsIfNeeded(string $notifyType, array $content, array $result): ?array
     {
-        $iccid = $this->nullableString($content['iccid'] ?? null);
-
-        if ($iccid === null) {
-            return [
-                'status' => 'skipped',
-                'reason' => 'missing_iccid',
-            ];
-        }
-
         $simcardId = $this->nullableString($result['simcard_id'] ?? null);
         $simcard = $simcardId === null ? null : Simcard::find($simcardId);
 
@@ -425,6 +416,22 @@ class EsimaccessWebhookService
             return [
                 'status' => 'skipped',
                 'reason' => 'missing_simcard',
+            ];
+        }
+
+        if ($this->isWholesaleSimcard($simcard)) {
+            return [
+                'status' => 'skipped',
+                'reason' => 'wholesale_simcard',
+            ];
+        }
+
+        $iccid = $this->nullableString($content['iccid'] ?? null);
+
+        if ($iccid === null) {
+            return [
+                'status' => 'skipped',
+                'reason' => 'missing_iccid',
             ];
         }
 
@@ -459,6 +466,14 @@ class EsimaccessWebhookService
                 'reason' => 'provider_sms_failed',
             ];
         }
+    }
+
+    private function isWholesaleSimcard(Simcard $simcard): bool
+    {
+        return str_starts_with(
+            trim((string) $simcard->idempotency_key),
+            'wholesale_esim_',
+        );
     }
 
     private function smsMessageForWebhook(string $notifyType, array $content, Simcard $simcard, ?string $webhookEventId): ?string
