@@ -42,13 +42,56 @@ class EsimSupportReplacementService
             && hash_equals((string) $simcard->email_hash, $this->crypto->deriveEmailHash($email));
 
         // A reseller or delegated customer may legitimately contact support from
-        // an address that never appears on the upstream Commerce order. Possession
-        // of the private 16-digit plan ID authorizes read-only technical support
-        // only. Email ownership remains mandatory for replacements, install
-        // credentials, refunds, subscriptions, and all other protected actions.
-        $technicalPossessionVerified = ! $emailMatch;
+        // an address that never appears on the upstream Commerce order. The
+        // public inspection surface grants only a technical-support capability:
+        // it deliberately withholds usage, provider identifiers, lifecycle data,
+        // plan data, and installation secrets. Full diagnostics are available
+        // only through the separate server-to-server provider-case endpoint.
+        if (! $emailMatch) {
+            $query = $this->simcards->queryStatusByPlanId($planId);
+            $install = is_array($query['install'] ?? null) ? $query['install'] : [];
+
+            return [
+                'found' => true,
+                'email_match' => false,
+                'technical_support_verified' => true,
+                'support_identity_mode' => 'sim_id_possession',
+                'used_bytes' => null,
+                'eligible_to_replace' => false,
+                'blocked_reason' => 'PROTECTED_ACTIONS_REQUIRE_EMAIL_MATCH',
+                'provider' => [],
+                'install' => ['apn' => isset($install['apn']) ? (string) $install['apn'] : null],
+                'plan' => [],
+            ];
+        }
 
         $query = $this->simcards->queryStatusByPlanId($planId);
+        return $this->detailedInspection($simcard, $query, true, 'retail_email');
+    }
+
+    /**
+     * Full diagnostics for the trusted AI provider-case executor. This response
+     * is never returned to the model or customer and cannot authorize a
+     * replacement, refund, cancellation, or disclosure of install secrets.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function inspectForProviderCase(string $planId): ?array
+    {
+        $planId = $this->normalizePlanId($planId);
+        $simcard = $this->simcards->findByPlanId($planId);
+        if ($simcard === null) {
+            return null;
+        }
+
+        $query = $this->simcards->queryStatusByPlanId($planId);
+
+        return $this->detailedInspection($simcard, $query, false, 'provider_case_executor');
+    }
+
+    /** @return array<string,mixed> */
+    private function detailedInspection(Simcard $simcard, array $query, bool $emailMatch, string $identityMode): array
+    {
         $provider = is_array($query['provider'] ?? null) ? $query['provider'] : [];
         $install = is_array($query['install'] ?? null) ? $query['install'] : [];
         $usedBytes = is_numeric($provider['used_bytes'] ?? null) ? (int) $provider['used_bytes'] : null;
@@ -74,8 +117,8 @@ class EsimSupportReplacementService
         return [
             'found' => true,
             'email_match' => $emailMatch,
-            'technical_support_verified' => $emailMatch || $technicalPossessionVerified,
-            'support_identity_mode' => $emailMatch ? 'retail_email' : 'sim_id_possession',
+            'technical_support_verified' => true,
+            'support_identity_mode' => $identityMode,
             'used_bytes' => $usedBytes,
             'eligible_to_replace' => $emailMatch
                 && $usedBytes === 0

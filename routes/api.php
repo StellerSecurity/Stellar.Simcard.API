@@ -81,5 +81,6 @@ Route::prefix('v1/support/sim')
     ->middleware(['stellar.sim.basic', 'throttle:sim.user.write'])
     ->group(function () {
         Route::post('/inspect', [SimSupportController::class, 'inspect']);
+        Route::post('/inspect-provider-case', [SimSupportController::class, 'inspectProviderCase']);
         Route::post('/replace-unused', [SimSupportController::class, 'replaceUnused']);
     });

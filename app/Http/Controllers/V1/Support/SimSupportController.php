@@ -57,6 +57,28 @@ class SimSupportController extends Controller
         }
     }
 
+    public function inspectProviderCase(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'plan_id' => ['required', 'string', 'max:64'],
+        ]);
+
+        try {
+            $result = $this->support->inspectForProviderCase((string) $data['plan_id']);
+            if ($result === null) {
+                return response()->json(['response_code' => 404, 'response_message' => 'eSIM not found.'], 404);
+            }
+
+            return response()->json(['response_code' => 200, 'data' => $result]);
+        } catch (RuntimeException $e) {
+            return $this->runtimeError($e);
+        } catch (Throwable $e) {
+            report($e);
+
+            return response()->json(['response_code' => 500, 'response_message' => 'Provider-case eSIM inspection failed.'], 500);
+        }
+    }
+
     private function runtimeError(RuntimeException $e): JsonResponse
     {
         $status = (int) $e->getCode();
