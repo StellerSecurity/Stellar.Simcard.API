@@ -53,6 +53,10 @@ Route::prefix('v1/sim')
         // POST /api/v1/sim/query
         Route::post('/query', [SimcardController::class, 'query']);
 
+        // Internal Commerce repair, matched by exact order/item/unit. No provider writes.
+        Route::patch('/purchased-plan', [SimcardController::class, 'backfillPurchasedPlan'])
+            ->middleware('throttle:sim.user.write');
+
         // POST /api/v1/sim/cancel
         Route::post('/cancel', UnusedEsimCancelController::class)
             ->middleware('throttle:sim.user.write');

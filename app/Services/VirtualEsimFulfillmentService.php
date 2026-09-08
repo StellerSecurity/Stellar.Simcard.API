@@ -39,6 +39,7 @@ class VirtualEsimFulfillmentService
         array $candidates,
         ?array $lockedRecipe = null,
         bool $enforceTargetDuration = false,
+        ?array $purchasedPlan = null,
     ): array {
         // A recipe is locked on the Simcard record before/with provider creation.
         // Retries must reuse it verbatim; changing BASE/TOPUP composition after one
@@ -94,6 +95,7 @@ class VirtualEsimFulfillmentService
             commerceUnit: $commerceUnit,
             idempotencyKey: $idempotencyKey,
             virtualFulfillmentRecipe: $recipe,
+            purchasedPlan: $purchasedPlan,
         );
 
         /** @var Simcard $simcard */

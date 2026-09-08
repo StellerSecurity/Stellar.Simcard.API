@@ -60,11 +60,19 @@ class SimcardService
         ?int $commerceUnit = null,
         ?string $idempotencyKey = null,
         ?array $virtualFulfillmentRecipe = null,
-        ?int $periodNum = null
+        ?int $periodNum = null,
+        ?array $purchasedPlan = null
     ): Simcard {
 
         $planId = preg_replace('/\s+/', '', (string) $planId);
         $planIdHash = $this->crypto->derivePlanHash($planId);
+        $purchasedPlan = \App\Support\PurchasedEsimPlan::normalize($purchasedPlan);
+        if ($purchasedPlan !== null) {
+            if (! Schema::hasColumn('simcards', 'purchased_plan')) {
+                throw new RuntimeException('Purchased eSIM plan storage is not migrated yet.', 503);
+            }
+            \App\Support\PurchasedEsimPlan::assertCompatible($purchasedPlan, $virtualFulfillmentRecipe, $periodNum);
+        }
         $commerceOrderId = $this->normalizeNullableIdentifier($commerceOrderId);
         $commerceOrderItemId = $this->normalizeNullableIdentifier($commerceOrderItemId);
         $commerceUnit = $commerceUnit !== null && $commerceUnit > 0 ? $commerceUnit : null;
@@ -87,7 +95,7 @@ class SimcardService
             throw new RuntimeException('Daily/Unlimited eSIM duration storage is not migrated yet.', 503);
         }
 
-        return DB::transaction(function () use ($planIdHash, $userId, $packageCode, $planId, $email, $emailSource, $commerceOrderId, $commerceOrderItemId, $commerceUnit, $idempotencyKey, $virtualFulfillmentRecipe, $periodNum) {
+        return DB::transaction(function () use ($planIdHash, $userId, $packageCode, $planId, $email, $emailSource, $commerceOrderId, $commerceOrderItemId, $commerceUnit, $idempotencyKey, $virtualFulfillmentRecipe, $periodNum, $purchasedPlan) {
             // If Commerce retries the same paid order item, do not create a second provider order.
             $existing = $this->findExistingSimcardForOrderRequest(
                 planIdHash: $planIdHash,
@@ -98,6 +106,14 @@ class SimcardService
             );
 
             if ($existing) {
+                if ($purchasedPlan !== null) {
+                    // Never let a retry relabel an eSIM belonging to another order.
+                    if (($existing->commerce_order_id && $existing->commerce_order_id !== $commerceOrderId)
+                        || ($existing->commerce_order_item_id && $existing->commerce_order_item_id !== $commerceOrderItemId)
+                        || ($existing->commerce_unit && (int) $existing->commerce_unit !== $commerceUnit)) {
+                        throw new SimcardOrderConflictException('Purchased plan order reference conflict.', 409);
+                    }
+                }
                 if (Schema::hasColumn('simcards', 'provider_period_num')) {
                     $existingPeriodNum = $existing->provider_period_num !== null
                         ? (int) $existing->provider_period_num
@@ -125,6 +141,9 @@ class SimcardService
                     }
                 }
 
+                if ($purchasedPlan !== null) {
+                    $this->storePurchasedPlan($existing, $purchasedPlan);
+                }
                 $this->storeEmailOnSimcard($existing, $email, $emailSource);
                 $this->attachCommerceIdempotencyMetadata($existing, $commerceOrderId, $commerceOrderItemId, $commerceUnit, $idempotencyKey);
                 $this->attachUserReference($existing, $userId, 'purchase');
@@ -172,6 +191,9 @@ class SimcardService
                 $attributes['virtual_fulfillment_recipe'] = $virtualFulfillmentRecipe;
             }
 
+            if ($purchasedPlan !== null) {
+                $attributes['purchased_plan'] = $purchasedPlan;
+            }
             $simcard = Simcard::create($attributes);
 
             $this->storeEmailOnSimcard($simcard, $email, $emailSource);
@@ -193,7 +215,8 @@ class SimcardService
         ?int $commerceUnit = null,
         ?string $idempotencyKey = null,
         ?array $virtualFulfillmentRecipe = null,
-        ?int $periodNum = null
+        ?int $periodNum = null,
+        ?array $purchasedPlan = null
     ): array {
         $simcard = $this->orderEsim(
             userId: $userId,
@@ -208,6 +231,7 @@ class SimcardService
             idempotencyKey: $idempotencyKey,
             virtualFulfillmentRecipe: $virtualFulfillmentRecipe,
             periodNum: $periodNum,
+            purchasedPlan: $purchasedPlan,
         );
 
         $install = $this->fetchInstallInfoWithRetry($planId);
@@ -574,6 +598,7 @@ class SimcardService
             'state' => $simcard->state,
             'provider' => $simcard->provider,
             'package_code' => $simcard->package_code,
+            'purchased_plan' => $this->purchasedPlanForDisplay($simcard),
             'plan_type' => $simcard->provider_period_num !== null ? 'unlimited' : 'fixed',
             'duration_days' => $simcard->provider_period_num !== null
                 ? (int) $simcard->provider_period_num
@@ -591,6 +616,46 @@ class SimcardService
             'activated_at' => $simcard->activated_at?->toIso8601String(),
             'purchased_on' => $simcard->purchased_on?->toIso8601String(),
         ];
+    }
+
+    public function purchasedPlanForDisplay(Simcard $simcard): ?array
+    {
+        return \App\Support\PurchasedEsimPlan::forDisplay(
+            $simcard->purchased_plan,
+            $simcard->virtual_fulfillment_recipe,
+            $simcard->provider_period_num !== null ? (int) $simcard->provider_period_num : null,
+        );
+    }
+
+    /** Metadata repair only: never provisions, tops up, or changes an entitlement. */
+    public function backfillPurchasedPlan(string $orderId, string $itemId, int $unit, array $plan): string
+    {
+        if (! Schema::hasColumn('simcards', 'purchased_plan')) {
+            throw new RuntimeException('Purchased eSIM plan storage is not migrated yet.', 503);
+        }
+        $plan = \App\Support\PurchasedEsimPlan::normalize($plan);
+        return DB::transaction(function () use ($orderId, $itemId, $unit, $plan): string {
+            $matches = Simcard::query()->where('commerce_order_id', $orderId)
+                ->where('commerce_order_item_id', $itemId)->where('commerce_unit', $unit)
+                ->lockForUpdate()->limit(2)->get();
+            if ($matches->isEmpty()) throw new RuntimeException('Purchased eSIM order unit not found.', 404);
+            if ($matches->count() !== 1) throw new RuntimeException('Ambiguous purchased eSIM order unit.', 409);
+            return $this->storePurchasedPlan($matches->first(), $plan);
+        });
+    }
+
+    private function storePurchasedPlan(Simcard $simcard, array $plan): string
+    {
+        \App\Support\PurchasedEsimPlan::assertCompatible($plan, $simcard->virtual_fulfillment_recipe,
+            $simcard->provider_period_num !== null ? (int) $simcard->provider_period_num : null);
+        $existing = \App\Support\PurchasedEsimPlan::normalize($simcard->purchased_plan);
+        if ($existing !== null) {
+            if ($existing !== $plan) throw new SimcardOrderConflictException('Purchased eSIM plan is immutable.', 409);
+            return 'unchanged';
+        }
+        $simcard->purchased_plan = $plan;
+        $simcard->save();
+        return 'updated';
     }
 
     private function findExistingSimcardForOrderRequest(
