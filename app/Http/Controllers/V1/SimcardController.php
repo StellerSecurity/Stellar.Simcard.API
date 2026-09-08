@@ -338,6 +338,25 @@ class SimcardController extends Controller
         ], 201);
     }
 
+    public function backfillPurchasedPlans(Request $request): JsonResponse
+    {
+        $rules = ['items' => ['required', 'array', 'min:1', 'max:100']];
+        foreach (array_merge(\App\Support\PurchasedEsimPlan::rules(), [
+            'purchased_plan' => ['required', 'array'],
+            'commerce_order_id' => ['required', 'uuid'],
+            'commerce_order_item_id' => ['required', 'uuid'],
+            'commerce_unit' => ['required', 'integer', 'min:1', 'max:99'],
+        ]) as $key => $constraints) {
+            $rules['items.*.'.$key] = array_map(
+                fn ($rule) => str_replace('required_with:purchased_plan', 'required', $rule), $constraints);
+        }
+        $validator = Validator::make($request->all(), $rules);
+        if ($validator->fails()) return $this->validationError($validator->errors()->toArray());
+        return response()->json(['response_code' => 200, 'data' => [
+            'results' => $this->simcardService->backfillPurchasedPlans(array_values($validator->validated()['items'])),
+        ]]);
+    }
+
     public function backfillPurchasedPlan(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), array_merge(

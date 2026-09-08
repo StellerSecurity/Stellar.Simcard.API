@@ -96,6 +96,35 @@ final class PurchasedPlanSnapshotTest extends TestCase
         self::assertSame($this->plan(20, true), $sim->fresh()->purchased_plan);
     }
 
+    public function test_batch_isolates_missing_and_conflicting_units_and_is_idempotent(): void
+    {
+        $sim = $this->sim();
+        $item = ['commerce_order_id' => 'order', 'commerce_order_item_id' => 'item',
+            'commerce_unit' => 1, 'purchased_plan' => $this->plan()];
+        $items = [$item, array_replace($item, ['commerce_unit' => 2]),
+            array_replace($item, ['purchased_plan' => $this->plan(20)]), $item];
+        self::assertSame([
+            ['index' => 0, 'status' => 'updated', 'code' => 200],
+            ['index' => 1, 'status' => 'rejected', 'code' => 404],
+            ['index' => 2, 'status' => 'rejected', 'code' => 409],
+            ['index' => 3, 'status' => 'unchanged', 'code' => 200],
+        ], $this->service()->backfillPurchasedPlans($items));
+        self::assertSame($this->plan(), $sim->fresh()->purchased_plan);
+        self::assertSame('CKH988', $sim->fresh()->package_code);
+    }
+
+    public function test_oversized_batch_is_rejected_before_any_write(): void
+    {
+        $sim = $this->sim();
+        try {
+            $this->service()->backfillPurchasedPlans(array_fill(0, 101, []));
+            self::fail('Oversized batch accepted');
+        } catch (RuntimeException $e) {
+            self::assertSame(422, $e->getCode());
+        }
+        self::assertNull($sim->fresh()->purchased_plan);
+    }
+
     public function test_conflicting_snapshot_rolls_back(): void
     {
         $sim = $this->sim(['purchased_plan' => $this->plan()]);

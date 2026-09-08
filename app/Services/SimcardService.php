@@ -627,6 +627,25 @@ class SimcardService
         );
     }
 
+    /** Each unit retains its own transaction, exact match and immutable terms check. */
+    public function backfillPurchasedPlans(array $items): array
+    {
+        if (count($items) < 1 || count($items) > 100) throw new RuntimeException('Invalid repair batch size.', 422);
+        $results = [];
+        foreach (array_values($items) as $index => $item) {
+            try {
+                $status = $this->backfillPurchasedPlan($item['commerce_order_id'],
+                    $item['commerce_order_item_id'], (int) $item['commerce_unit'], $item['purchased_plan']);
+                $results[] = ['index' => $index, 'status' => $status, 'code' => 200];
+            } catch (RuntimeException $exception) {
+                $code = (int) $exception->getCode();
+                if (! in_array($code, [404, 409, 422], true)) throw $exception;
+                $results[] = ['index' => $index, 'status' => 'rejected', 'code' => $code];
+            }
+        }
+        return $results;
+    }
+
     /** Metadata repair only: never provisions, tops up, or changes an entitlement. */
     public function backfillPurchasedPlan(string $orderId, string $itemId, int $unit, array $plan): string
     {
