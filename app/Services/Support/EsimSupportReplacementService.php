@@ -259,6 +259,7 @@ class EsimSupportReplacementService
                 targetDurationDays: (int) $targetDays,
                 candidates: [],
                 lockedRecipe: $recipe,
+                purchasedPlan: $old->purchased_plan,
             );
             return ['simcard' => $result['simcard'], 'install' => $result['install']];
         }
@@ -276,6 +277,7 @@ class EsimSupportReplacementService
             idempotencyKey: 'support-replacement:'.$replacement->id,
             virtualFulfillmentRecipe: null,
             periodNum: $old->provider_period_num !== null ? (int) $old->provider_period_num : null,
+            purchasedPlan: $old->purchased_plan,
         );
     }
 

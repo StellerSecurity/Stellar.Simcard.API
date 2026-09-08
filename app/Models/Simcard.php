@@ -26,6 +26,7 @@ class Simcard extends Model
         'install_payload_crypto_version' => 'integer',
         'virtual_fulfillment_recipe' => 'array',
         'provider_period_num' => 'integer',
+        'purchased_plan' => 'array',
     ];
 
     protected $fillable = [
@@ -33,6 +34,7 @@ class Simcard extends Model
         'provider',
         'provider_account',
         'package_code',
+        'purchased_plan',
         'provider_period_num',
         'virtual_fulfillment_recipe',
         'external_order_id_enc',
@@ -74,6 +76,7 @@ class Simcard extends Model
     ];
 
     protected $hidden = [
+        'purchased_plan',
         'external_order_id_enc',
         'external_order_id_hash',
         'install_payload_enc',

@@ -55,6 +55,7 @@ class SimcardController extends Controller
         $this->normalizePlanId($request);
 
         $validator = Validator::make($request->all(), [
+            ...\App\Support\PurchasedEsimPlan::rules(),
             'plan_id' => ['required', 'string', 'regex:/^\d{16}$/'],
             'packageCode' => ['required', 'string', 'max:64'],
             'user_id' => ['nullable', 'integer', 'min:1'],
@@ -90,6 +91,7 @@ class SimcardController extends Controller
                 commerceUnit: isset($data['commerce_unit']) ? (int) $data['commerce_unit'] : null,
                 idempotencyKey: $data['idempotency_key'] ?? null,
                 periodNum: isset($data['days']) ? (int) $data['days'] : null,
+                purchasedPlan: $data['purchased_plan'] ?? null,
             );
         } catch (SimcardOwnershipConflictException $exception) {
             return $this->ownershipConflict($exception->getMessage());
@@ -98,6 +100,14 @@ class SimcardController extends Controller
                 'response_code' => 409,
                 'response_message' => $exception->getMessage(),
             ], 409);
+        } catch (RuntimeException $exception) {
+            // Preserve retryable migration failures before any provider purchase.
+            $code = (int) $exception->getCode();
+            if (! in_array($code, [409, 422, 503], true)) throw $exception;
+            return response()->json([
+                'response_code' => $code,
+                'response_message' => $exception->getMessage(),
+            ], $code);
         }
 
         $autoTopupConfigured = false;
@@ -126,6 +136,10 @@ class SimcardController extends Controller
                     'state' => $result['simcard']->state,
                     'provider' => $result['simcard']->provider,
                     'package_code' => $result['simcard']->package_code,
+                    'purchased_plan' => \App\Support\PurchasedEsimPlan::forDisplay(
+                        $result['simcard']->purchased_plan, $result['simcard']->virtual_fulfillment_recipe,
+                        $result['simcard']->provider_period_num !== null ? (int) $result['simcard']->provider_period_num : null,
+                    ),
                     'plan_type' => $result['simcard']->provider_period_num !== null ? 'unlimited' : 'fixed',
                     'duration_days' => $result['simcard']->provider_period_num !== null
                         ? (int) $result['simcard']->provider_period_num
@@ -216,6 +230,7 @@ class SimcardController extends Controller
         $this->normalizePlanId($request);
 
         $validator = Validator::make($request->all(), [
+            ...\App\Support\PurchasedEsimPlan::rules(),
             'plan_id' => ['required', 'string', 'regex:/^\d{16}$/'],
             'user_id' => ['nullable', 'integer', 'min:1'],
             'email' => ['nullable', 'email', 'max:254'],
@@ -257,6 +272,7 @@ class SimcardController extends Controller
                 targetDurationDays: (int) $virtual['target_duration_days'],
                 candidates: (array) $virtual['candidates'],
                 enforceTargetDuration: (bool) ($virtual['enforce_target_duration'] ?? false),
+                purchasedPlan: $data['purchased_plan'] ?? null,
             );
         } catch (SimcardOwnershipConflictException $exception) {
             return $this->ownershipConflict($exception->getMessage());
@@ -309,6 +325,10 @@ class SimcardController extends Controller
                     'state' => $result['simcard']->state,
                     'provider' => $result['simcard']->provider,
                     'package_code' => $result['simcard']->package_code,
+                    'purchased_plan' => \App\Support\PurchasedEsimPlan::forDisplay(
+                        $result['simcard']->purchased_plan, $result['simcard']->virtual_fulfillment_recipe,
+                        $result['simcard']->provider_period_num !== null ? (int) $result['simcard']->provider_period_num : null,
+                    ),
                     'account_linked' => $result['simcard']->user_ref !== null,
                     'auto_topup_configured' => $autoTopupConfigured,
                 ],
@@ -316,6 +336,32 @@ class SimcardController extends Controller
                 'virtual_fulfillment' => $result['virtual_fulfillment'],
             ],
         ], 201);
+    }
+
+    public function backfillPurchasedPlan(Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), array_merge(
+            \App\Support\PurchasedEsimPlan::rules(),
+            [
+                'purchased_plan' => ['required', 'array'],
+                'commerce_order_id' => ['required', 'uuid'],
+                'commerce_order_item_id' => ['required', 'uuid'],
+                'commerce_unit' => ['required', 'integer', 'min:1', 'max:99'],
+            ],
+        ));
+        if ($validator->fails()) return $this->validationError($validator->errors()->toArray());
+        $data = $validator->validated();
+        try {
+            $status = $this->simcardService->backfillPurchasedPlan(
+                $data['commerce_order_id'], $data['commerce_order_item_id'],
+                (int) $data['commerce_unit'], $data['purchased_plan'],
+            );
+            return response()->json(['response_code' => 200, 'data' => ['status' => $status]]);
+        } catch (RuntimeException $exception) {
+            $code = (int) $exception->getCode();
+            return response()->json(['response_code' => $code, 'response_message' => $exception->getMessage()],
+                in_array($code, [404, 409, 422, 503], true) ? $code : 500);
+        }
     }
 
     public function query(Request $request): JsonResponse
@@ -347,6 +393,10 @@ class SimcardController extends Controller
                     'state' => $result['simcard']->state,
                     'provider' => $result['simcard']->provider,
                     'package_code' => $result['simcard']->package_code,
+                    'purchased_plan' => \App\Support\PurchasedEsimPlan::forDisplay(
+                        $result['simcard']->purchased_plan, $result['simcard']->virtual_fulfillment_recipe,
+                        $result['simcard']->provider_period_num !== null ? (int) $result['simcard']->provider_period_num : null,
+                    ),
                     'plan_type' => $result['simcard']->provider_period_num !== null ? 'unlimited' : 'fixed',
                     'duration_days' => $result['simcard']->provider_period_num !== null
                         ? (int) $result['simcard']->provider_period_num
