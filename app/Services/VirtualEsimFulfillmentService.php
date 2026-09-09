@@ -40,6 +40,7 @@ class VirtualEsimFulfillmentService
         ?array $lockedRecipe = null,
         bool $enforceTargetDuration = false,
         ?array $purchasedPlan = null,
+        ?string $requiredBasePackageCode = null,
     ): array {
         // A recipe is locked on the Simcard record before/with provider creation.
         // Retries must reuse it verbatim; changing BASE/TOPUP composition after one
@@ -50,12 +51,12 @@ class VirtualEsimFulfillmentService
             : null;
 
         if ($storedRecipe !== null) {
-            $recipe = $this->validateLockedRecipe($storedRecipe, $targetDataBytes, $targetDurationDays, $enforceTargetDuration);
+            $recipe = $this->validateLockedRecipe($storedRecipe, $targetDataBytes, $targetDurationDays, $enforceTargetDuration, $requiredBasePackageCode);
         } elseif ($lockedRecipe !== null) {
             // Support replacement reuses the exact original recipe. Never re-resolve a
             // replacement against a changed provider catalog and accidentally alter the
             // customer's purchased data/validity composition.
-            $recipe = $this->validateLockedRecipe($lockedRecipe, $targetDataBytes, $targetDurationDays, $enforceTargetDuration);
+            $recipe = $this->validateLockedRecipe($lockedRecipe, $targetDataBytes, $targetDurationDays, $enforceTargetDuration, $requiredBasePackageCode);
         } else {
             // Resolve BEFORE spending provider balance. Exact BASE+TOPUP composition
             // is preferred; otherwise the resolver may select a larger BASE protected
@@ -65,8 +66,9 @@ class VirtualEsimFulfillmentService
                 targetDataBytes: $targetDataBytes,
                 targetDurationDays: $targetDurationDays,
                 enforceTargetDuration: $enforceTargetDuration,
+                requiredBasePackageCode: $requiredBasePackageCode,
             );
-            $recipe = $this->validateLockedRecipe($recipe, $targetDataBytes, $targetDurationDays, $enforceTargetDuration);
+            $recipe = $this->validateLockedRecipe($recipe, $targetDataBytes, $targetDurationDays, $enforceTargetDuration, $requiredBasePackageCode);
         }
 
         $recipeTopups = array_values((array) ($recipe['topups'] ?? []));
@@ -114,7 +116,7 @@ class VirtualEsimFulfillmentService
         $persistedRecipe = is_array($simcard->virtual_fulfillment_recipe)
             ? $simcard->virtual_fulfillment_recipe
             : $recipe;
-        $recipe = $this->validateLockedRecipe($persistedRecipe, $targetDataBytes, $targetDurationDays, $enforceTargetDuration);
+        $recipe = $this->validateLockedRecipe($persistedRecipe, $targetDataBytes, $targetDurationDays, $enforceTargetDuration, $requiredBasePackageCode);
 
         if ($recipeTopups === []) {
             $recipe['fulfilled_topups'] = [];
@@ -396,9 +398,13 @@ class VirtualEsimFulfillmentService
         int $targetDataBytes,
         int $targetDurationDays,
         bool $enforceTargetDuration = false,
+        ?string $requiredBasePackageCode = null,
     ): array {
         $strategy = trim((string) ($recipe['strategy'] ?? ''));
         $basePackageCode = trim((string) data_get($recipe, 'base.package_code', ''));
+        if ($requiredBasePackageCode !== null && ($requiredBasePackageCode === '' || $basePackageCode !== $requiredBasePackageCode)) {
+            throw new RuntimeException('Stored virtual-plan recipe uses a different provider package; manual reconciliation is required.', 409);
+        }
         $deliveredBytes = data_get($recipe, 'delivered_data_bytes');
         $deliveredDays = data_get($recipe, 'delivered_duration_days');
         $recipeTargetBytes = data_get($recipe, 'target_data_bytes');
@@ -456,3 +462,4 @@ class VirtualEsimFulfillmentService
         throw new RuntimeException('Stored virtual-plan fulfillment recipe uses an unsupported strategy.', 409);
     }
 }
+

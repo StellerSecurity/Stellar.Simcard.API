@@ -167,6 +167,7 @@ class SimcardController extends Controller
             'virtual_plan.target_data_bytes' => ['required', 'integer', 'min:1'],
             'virtual_plan.target_duration_days' => ['required', 'integer', 'min:1', 'max:3650'],
             'virtual_plan.enforce_target_duration' => ['nullable', 'boolean'],
+            'virtual_plan.required_base_package_code' => ['nullable', 'string', 'max:128'],
             'virtual_plan.candidates' => ['required', 'array', 'min:1', 'max:50'],
             'virtual_plan.candidates.*.package_code' => ['required', 'string', 'max:128'],
             'virtual_plan.candidates.*.data_bytes' => ['required', 'integer', 'min:1'],
@@ -188,6 +189,7 @@ class SimcardController extends Controller
                 targetDataBytes: (int) $virtual['target_data_bytes'],
                 targetDurationDays: (int) $virtual['target_duration_days'],
                 enforceTargetDuration: (bool) ($virtual['enforce_target_duration'] ?? false),
+                requiredBasePackageCode: $virtual['required_base_package_code'] ?? null,
             );
         } catch (RuntimeException $exception) {
             $status = (int) $exception->getCode();
@@ -243,6 +245,7 @@ class SimcardController extends Controller
             'virtual_plan.target_data_bytes' => ['required', 'integer', 'min:1'],
             'virtual_plan.target_duration_days' => ['required', 'integer', 'min:1', 'max:3650'],
             'virtual_plan.enforce_target_duration' => ['nullable', 'boolean'],
+            'virtual_plan.required_base_package_code' => ['nullable', 'string', 'max:128'],
             'virtual_plan.candidates' => ['required', 'array', 'min:1', 'max:50'],
             'virtual_plan.candidates.*.package_code' => ['required', 'string', 'max:128'],
             'virtual_plan.candidates.*.data_bytes' => ['required', 'integer', 'min:1'],
@@ -272,6 +275,7 @@ class SimcardController extends Controller
                 targetDurationDays: (int) $virtual['target_duration_days'],
                 candidates: (array) $virtual['candidates'],
                 enforceTargetDuration: (bool) ($virtual['enforce_target_duration'] ?? false),
+                requiredBasePackageCode: $virtual['required_base_package_code'] ?? null,
                 purchasedPlan: $data['purchased_plan'] ?? null,
             );
         } catch (SimcardOwnershipConflictException $exception) {
@@ -597,3 +601,4 @@ class SimcardController extends Controller
         ], 409);
     }
 }
+

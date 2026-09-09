@@ -38,11 +38,21 @@ class VirtualEsimPlanResolver
         int $targetDataBytes,
         int $targetDurationDays,
         bool $enforceTargetDuration = false,
+        ?string $requiredBasePackageCode = null,
     ): array {
         if ($targetDataBytes <= 0 || $targetDurationDays <= 0) {
             throw new RuntimeException('Virtual plan target data and duration must be positive.', 422);
         }
 
+        if ($requiredBasePackageCode !== null) {
+            $requiredBasePackageCode = trim($requiredBasePackageCode);
+            if ($requiredBasePackageCode === '') {
+                throw new RuntimeException('Required provider package cannot be blank.', 422);
+            }
+            $candidates = array_values(array_filter($candidates,
+                static fn ($candidate): bool => is_array($candidate)
+                    && trim((string) ($candidate['package_code'] ?? '')) === $requiredBasePackageCode));
+        }
         $normalizedCandidates = $this->normalizeCandidates($candidates, $targetDataBytes, $targetDurationDays);
         if ($normalizedCandidates === []) {
             throw new RuntimeException('Virtual plan has no eligible real provider base packages.', 422);
@@ -671,3 +681,4 @@ class VirtualEsimPlanResolver
         return false;
     }
 }
+
