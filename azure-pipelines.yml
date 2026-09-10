@@ -78,6 +78,7 @@ stages:
         vendor/bin/pest \
           tests/Unit/AutomaticDatabaseMigrationsTest.php \
           tests/Unit/EsimAutoTopupManagementPricingTest.php \
+          tests/Unit/TopupProviderCompatibilityTest.php \
           tests/Unit/AutoTopupPaymentRecoverySecurityTest.php \
           tests/Feature/AutoTopupPaymentRecoveryEndpointTest.php \
           tests/Feature/AutoTopupPaymentRecoveryStateTest.php \

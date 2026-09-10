@@ -19,6 +19,12 @@ use Throwable;
 
 class TopupService
 {
+    private const DISPLAY_CURRENCY = 'EUR';
+
+    private const DISCOUNT_PERCENT = 72;
+
+    private const DEFAULT_USD_TO_EUR_RATE = 0.92;
+
     private const ACTION_TOPUP = 'topup';
 
     private const STATUS_PENDING_PAYMENT = 'PENDING_PAYMENT';
@@ -328,6 +334,7 @@ class TopupService
             throw new RuntimeException('No compatible top-up with the same data allowance is available for this eSIM.', 422);
         }
 
+        $matchedPlan = $this->customerTopupPlan($matchedPlan);
         $packageCode = $this->normalizePackageCode((string) ($matchedPlan['package_code'] ?? ''));
         $sessionIdempotencyKey = hash('sha256', 'simcard-auto-topup-session|'.$attemptKey);
 
@@ -1903,13 +1910,45 @@ class TopupService
         $priceCents = (int) ($plan['price_cents'] ?? $plan['unit_price_cents'] ?? 0);
         $sourceCurrency = strtoupper(trim((string) ($plan['currency'] ?? '')));
         $providerCurrency = strtoupper(trim((string) ($plan['provider_currency'] ?? '')));
+        $providerPriceCents = (int) ($plan['provider_price_cents'] ?? $priceCents);
+        $pricingSource = trim((string) ($plan['pricing_source'] ?? ''));
 
         if ($sourceCurrency === '') {
             $sourceCurrency = $providerCurrency !== '' ? $providerCurrency : 'USD';
         }
 
-        $plan['currency'] = 'EUR';
-        $plan['customer_currency'] = 'EUR';
+        if ($providerCurrency === '') {
+            $providerCurrency = $sourceCurrency;
+        }
+
+        $hasTrustedCustomerPrice = in_array($pricingSource, ['stellar_data_ui_api', 'simcard_api_eur'], true)
+            && $sourceCurrency === self::DISPLAY_CURRENCY
+            && $priceCents > 0;
+
+        if (! $hasTrustedCustomerPrice && $providerPriceCents > 0) {
+            $fxRate = 1.0;
+            $fxSource = 'none';
+            $convertedCents = (float) $providerPriceCents;
+
+            if ($providerCurrency === 'USD') {
+                $fxRate = $this->usdToEurRate();
+                $convertedCents *= $fxRate;
+                $fxSource = 'configured_rate';
+            }
+
+            $priceCents = max(1, (int) round(
+                $convertedCents * ((100 - $this->discountPercent()) / 100)
+            ));
+
+            $plan['price_discount_percent'] = $this->discountPercent();
+            $plan['price_fx_rate'] = $fxRate;
+            $plan['price_fx_source'] = $fxSource;
+            $plan['pricing_source'] = 'simcard_api_eur';
+            $plan['pricing_version'] = 'eur_40off_v1';
+        }
+
+        $plan['currency'] = self::DISPLAY_CURRENCY;
+        $plan['customer_currency'] = self::DISPLAY_CURRENCY;
 
         if ($priceCents > 0) {
             $plan['price_cents'] = $priceCents;
@@ -1918,23 +1957,44 @@ class TopupService
         }
 
         if (! isset($plan['original_currency']) || trim((string) $plan['original_currency']) === '') {
-            $plan['original_currency'] = $providerCurrency !== '' ? $providerCurrency : $sourceCurrency;
+            $plan['original_currency'] = $providerCurrency;
         }
 
-        if (! isset($plan['original_price_cents']) && $priceCents > 0) {
-            $plan['original_price_cents'] = (int) ($plan['provider_price_cents'] ?? $priceCents);
+        if (! isset($plan['original_price_cents']) && $providerPriceCents > 0) {
+            $plan['original_price_cents'] = $providerPriceCents;
         }
 
-        $pricingSource = trim((string) ($plan['pricing_source'] ?? ''));
-        if ($pricingSource === '' || $pricingSource === 'provider_raw') {
-            $plan['pricing_source'] = 'simcard_api_eur';
+        if (! isset($plan['provider_price_cents']) && $providerPriceCents > 0) {
+            $plan['provider_price_cents'] = $providerPriceCents;
         }
 
-        if (! isset($plan['pricing_version']) || trim((string) $plan['pricing_version']) === '') {
-            $plan['pricing_version'] = 'topup_eur_v1';
+        if (! isset($plan['provider_currency']) || trim((string) $plan['provider_currency']) === '') {
+            $plan['provider_currency'] = $providerCurrency;
         }
 
         return array_filter($plan, static fn ($value) => $value !== null && $value !== '');
+    }
+
+    private function discountPercent(): int
+    {
+        $configured = config('services.stellar_topup_pricing.discount_percent');
+
+        if (is_numeric($configured)) {
+            return max(0, min(100, (int) $configured));
+        }
+
+        return self::DISCOUNT_PERCENT;
+    }
+
+    private function usdToEurRate(): float
+    {
+        $configured = config('services.stellar_topup_pricing.usd_to_eur_rate');
+
+        if (is_numeric($configured) && (float) $configured > 0) {
+            return (float) $configured;
+        }
+
+        return self::DEFAULT_USD_TO_EUR_RATE;
     }
 
     private function applyTrustedCustomerPricing(array $providerPlan, array $selectedPlan): array

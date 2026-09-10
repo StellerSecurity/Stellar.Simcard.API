@@ -47,6 +47,12 @@ return [
         'topup_checkout_url' => env('STELLAR_DATA_TOPUP_CHECKOUT_URL'),
     ],
 
+    'stellar_topup_pricing' => [
+        'currency' => env('STELLAR_TOPUP_DISPLAY_CURRENCY', 'EUR'),
+        'discount_percent' => env('STELLAR_TOPUP_DISCOUNT_PERCENT', 72),
+        'usd_to_eur_rate' => env('STELLAR_TOPUP_USD_TO_EUR_RATE', env('ESIMACCESS_USD_TO_EUR_RATE', 0.92)),
+    ],
+
     'stellar_commerce' => [
         'topup_checkout_url' => env('STELLAR_COMMERCE_TOPUP_CHECKOUT_URL'),
         'vpn_topup_offer_url' => env(

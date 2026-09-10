@@ -55,7 +55,7 @@ it('keeps the public slug while retaining the provider topup package code', func
         ->and($plans[0]['topup_payload_type'])->toBe('package_code');
 });
 
-it('publishes customer topup pricing in EUR while retaining the provider currency metadata', function (): void {
+it('publishes DataApp-equivalent customer topup pricing in EUR while retaining provider metadata', function (): void {
     $service = topupServiceWithoutConstructor();
 
     $customerPlan = invokeTopupPrivate($service, 'customerTopupPlan', [[
@@ -68,14 +68,59 @@ it('publishes customer topup pricing in EUR while retaining the provider currenc
         'pricing_source' => 'provider_raw',
     ]]);
 
-    expect($customerPlan['price_cents'])->toBe(3525)
-        ->and($customerPlan['unit_price_cents'])->toBe(3525)
+    expect($customerPlan['price_cents'])->toBe(908)
+        ->and($customerPlan['unit_price_cents'])->toBe(908)
         ->and($customerPlan['currency'])->toBe('EUR')
         ->and($customerPlan['customer_currency'])->toBe('EUR')
+        ->and($customerPlan['provider_price_cents'])->toBe(3525)
         ->and($customerPlan['provider_currency'])->toBe('USD')
+        ->and($customerPlan['original_price_cents'])->toBe(3525)
         ->and($customerPlan['original_currency'])->toBe('USD')
         ->and($customerPlan['pricing_source'])->toBe('simcard_api_eur')
-        ->and($customerPlan['pricing_version'])->toBe('topup_eur_v1');
+        ->and($customerPlan['pricing_version'])->toBe('eur_40off_v1')
+        ->and($customerPlan['price_discount_percent'])->toBe(72)
+        ->and($customerPlan['price_fx_rate'])->toBe(0.92);
+});
+
+it('matches the DataApp prices for the reported China topup catalogue', function (int $providerCents, int $customerCents): void {
+    $service = topupServiceWithoutConstructor();
+
+    $customerPlan = invokeTopupPrivate($service, 'customerTopupPlan', [[
+        'price_cents' => $providerCents,
+        'provider_price_cents' => $providerCents,
+        'currency' => 'USD',
+        'provider_currency' => 'USD',
+        'pricing_source' => 'provider_raw',
+    ]]);
+
+    expect($customerPlan['price_cents'])->toBe($customerCents);
+})->with([
+    '1 GB 7 days' => [525, 135],
+    '1 GB 7 days non-HK IP' => [758, 195],
+    '3 GB 15 days' => [1815, 468],
+    '3 GB 30 days' => [1980, 510],
+    '5 GB 30 days' => [2640, 680],
+    '10 GB 30 days' => [5085, 1310],
+    '20 GB 30 days' => [10358, 2668],
+]);
+
+it('does not discount a trusted DataApp customer price twice', function (): void {
+    $service = topupServiceWithoutConstructor();
+
+    $customerPlan = invokeTopupPrivate($service, 'customerTopupPlan', [[
+        'price_cents' => 135,
+        'unit_price_cents' => 135,
+        'currency' => 'EUR',
+        'provider_price_cents' => 525,
+        'provider_currency' => 'USD',
+        'pricing_source' => 'stellar_data_ui_api',
+        'pricing_version' => 'eur_40off_v1',
+    ]]);
+
+    expect($customerPlan['price_cents'])->toBe(135)
+        ->and($customerPlan['unit_price_cents'])->toBe(135)
+        ->and($customerPlan['provider_price_cents'])->toBe(525)
+        ->and($customerPlan['pricing_source'])->toBe('stellar_data_ui_api');
 });
 
 it('keeps an ICCID-authorized fixed TOPUP row even when that recharge row reports supportTopUpType 1', function (): void {
