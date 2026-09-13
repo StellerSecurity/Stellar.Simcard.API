@@ -461,37 +461,7 @@ class VirtualEsimQuotaService
             $query->whereKey($onlySimcardId);
         }
 
-        // The current virtual catalogue is small enough to sort due checks in PHP.
-        // This keeps the feature additive and avoids adding scheduling columns to the
-        // core simcards table solely for the quota fallback.
-        $candidates = $query->limit(5000)->get()
-            ->filter(fn (Simcard $simcard): bool => $this->isQuotaCapped($simcard))
-            ->filter(function (Simcard $simcard) use ($force): bool {
-                $state = strtoupper(trim((string) data_get($simcard->virtual_fulfillment_recipe, 'quota.state', 'MONITORING')));
-                if ($state === 'SUSPENDED') {
-                    return false;
-                }
-
-                if ($force) {
-                    return true;
-                }
-
-                $last = data_get($simcard->virtual_fulfillment_recipe, 'quota.last_checked_at');
-                if (! is_string($last) || trim($last) === '') {
-                    return true;
-                }
-
-                try {
-                    return Carbon::parse($last)->diffInSeconds(now(), true) >= self::CHECK_INTERVAL_SECONDS;
-                } catch (Throwable) {
-                    return true;
-                }
-            })
-            ->sortBy(function (Simcard $simcard): string {
-                return (string) data_get($simcard->virtual_fulfillment_recipe, 'quota.last_checked_at', '');
-            })
-            ->take(max(1, min($limit, 500)))
-            ->values();
+        $candidates = $this->selectQuotaCandidates($query->limit(5000)->cursor(), $limit, $force);
 
         foreach ($candidates as $simcard) {
             $summary['processed']++;
@@ -526,6 +496,49 @@ class VirtualEsimQuotaService
         }
 
         return $summary;
+    }
+
+    private function selectQuotaCandidates(iterable $simcards, int $limit, bool $force): \Illuminate\Support\Collection
+    {
+        // Retain only the best candidates plus small iteration batches, rather than
+        // hydrating all 5,000 models at once. Complete selection before any
+        // provider calls or writes. Stable sorting preserves ties/input order.
+        $limit = max(1, min($limit, 500));
+        $candidates = collect();
+        $eligible = \Illuminate\Support\LazyCollection::make(function () use ($simcards) {
+            yield from $simcards;
+        })
+            ->filter(fn (Simcard $simcard): bool => $this->isQuotaCapped($simcard))
+            ->filter(function (Simcard $simcard) use ($force): bool {
+                $state = strtoupper(trim((string) data_get($simcard->virtual_fulfillment_recipe, 'quota.state', 'MONITORING')));
+                if ($state === 'SUSPENDED') {
+                    return false;
+                }
+
+                if ($force) {
+                    return true;
+                }
+
+                $last = data_get($simcard->virtual_fulfillment_recipe, 'quota.last_checked_at');
+                if (! is_string($last) || trim($last) === '') {
+                    return true;
+                }
+
+                try {
+                    return Carbon::parse($last)->diffInSeconds(now(), true) >= self::CHECK_INTERVAL_SECONDS;
+                } catch (Throwable) {
+                    return true;
+                }
+            });
+
+        foreach ($eligible->chunk(100) as $batch) {
+            $candidates = $candidates->concat($batch)
+                ->sortBy(fn (Simcard $simcard): string => (string) data_get($simcard->virtual_fulfillment_recipe, 'quota.last_checked_at', ''))
+                ->take($limit)
+                ->values();
+        }
+
+        return $candidates;
     }
 
     /** @return array<string,mixed> */

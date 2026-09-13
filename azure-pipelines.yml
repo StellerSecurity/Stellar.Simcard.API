@@ -76,6 +76,9 @@ stages:
 
         php artisan migrate:fresh --force --no-interaction
         vendor/bin/pest \
+          tests/Unit/QuotaCandidateSelectionTest.php \
+          tests/Unit/VirtualEsimQuotaServiceTest.php \
+          tests/Feature/VirtualEsimDurationEntitlementTest.php \
           tests/Unit/AutomaticDatabaseMigrationsTest.php \
           tests/Unit/EsimAutoTopupManagementPricingTest.php \
           tests/Unit/AutoTopupPaymentRecoverySecurityTest.php \
