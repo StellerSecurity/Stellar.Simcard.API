@@ -273,6 +273,24 @@ class EsimaccessProvider implements EsimProvider
             ->json();
     }
 
+    public function suspendEsimByTransaction(string $esimTranNo, string $account = self::ACCOUNT_PRIMARY): array
+    {
+        $payload = ['esimTranNo' => trim($esimTranNo)];
+
+        $response = $this->http()
+            ->withHeaders($this->createHeaders($payload, $account))
+            ->post($this->baseUrl . '/v1/open/esim/suspend', $payload);
+
+        $body = $response->json();
+        if (is_array($body)) {
+            return $body;
+        }
+
+        $response->throw();
+
+        throw new RuntimeException('The eSIMAccess suspension response was not valid JSON.');
+    }
+
     public function unsuspendEsim(string $iccid, string $account = self::ACCOUNT_PRIMARY): array
     {
         $payload = ['iccid' => trim($iccid)];

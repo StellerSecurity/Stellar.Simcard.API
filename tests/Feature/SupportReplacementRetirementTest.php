@@ -140,9 +140,9 @@ it('suspends a zero-usage profile when revoke is unavailable and deletion is not
     $provider->shouldReceive('revokeEsim')
         ->once()
         ->andReturn(['errorCode' => '200002']);
-    $provider->shouldReceive('suspendEsim')
+    $provider->shouldReceive('suspendEsimByTransaction')
         ->once()
-        ->with('8945000000000000000', 'primary')
+        ->with('26091323430015', 'primary')
         ->andReturn(['success' => true, 'errorCode' => '0']);
     $provider->shouldReceive('queryOrder')
         ->once()
@@ -171,7 +171,7 @@ it('does not provision after a suspension fallback until the provider confirms i
     $provider = Mockery::mock(EsimProvider::class);
     $provider->shouldReceive('queryOrder')->times(6)->andReturn($before);
     $provider->shouldReceive('revokeEsim')->once()->andReturn(['errorCode' => '200002']);
-    $provider->shouldReceive('suspendEsim')->once()->andReturn(['success' => true, 'errorCode' => '0']);
+    $provider->shouldReceive('suspendEsimByTransaction')->once()->andReturn(['success' => true, 'errorCode' => '0']);
     $provider->shouldReceive('cancelEsim')->never();
 
     expect(fn () => (new UnusedEsimCancellationService($provider, $crypto))->retireForReplacement($planId))

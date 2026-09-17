@@ -39,6 +39,9 @@ interface EsimProvider
     /** Suspend data service for an allocated eSIM profile. */
     public function suspendEsim(string $iccid, string $account = 'primary'): array;
 
+    /** Suspend an eSIM by the provider transaction number used by the support API. */
+    public function suspendEsimByTransaction(string $esimTranNo, string $account = 'primary'): array;
+
     /** Restore data service for a previously suspended eSIM profile. */
     public function unsuspendEsim(string $iccid, string $account = 'primary'): array;
 
