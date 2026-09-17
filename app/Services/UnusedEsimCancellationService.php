@@ -124,8 +124,7 @@ class UnusedEsimCancellationService
                 // fresh provider confirmation of SUSPENDED/DISABLED and exactly zero
                 // usage before replacement provisioning may continue.
                 if ($this->canUseSuspensionFallback($confirmed)) {
-                    $iccid = $this->providerIccid($confirmed, $simcard);
-                    $suspendResponse = $this->provider->suspendEsim($iccid, $account);
+                    $suspendResponse = $this->provider->suspendEsimByTransaction($esimTranNo, $account);
                     $this->assertProviderAcceptedRetirement($suspendResponse, 'suspend');
 
                     $suspended = $this->waitForProviderSuspension($externalOrderId, $account);
@@ -412,20 +411,6 @@ class UnusedEsimCancellationService
                 $this->normalizedStatus($esim['esimStatus'] ?? null) === 'SUSPENDED'
                 || $this->normalizedStatus($esim['smdpStatus'] ?? null) === 'DISABLED'
             );
-    }
-
-    private function providerIccid(array $esim, Simcard $simcard): string
-    {
-        $iccid = trim((string) ($esim['iccid'] ?? ''));
-        if ($iccid === '' && ! empty($simcard->iccid_enc)) {
-            $iccid = trim($this->crypto->decryptSensitiveValue((string) $simcard->iccid_enc));
-        }
-
-        if ($iccid === '') {
-            throw new RuntimeException('The provider did not return the ICCID required to suspend the old eSIM.');
-        }
-
-        return $iccid;
     }
 
     private function markRetired(Simcard $simcard, array $provider): void
