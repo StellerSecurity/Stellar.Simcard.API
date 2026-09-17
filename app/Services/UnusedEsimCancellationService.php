@@ -117,6 +117,26 @@ class UnusedEsimCancellationService
                         'provider' => $this->safeProviderStatus($confirmed),
                     ];
                 }
+
+                // Some installed zero-usage profiles remain queryable but reject
+                // permanent revoke with 200002. Do not issue a second live profile
+                // while the old one can still carry data: suspend it, then require a
+                // fresh provider confirmation of SUSPENDED/DISABLED and exactly zero
+                // usage before replacement provisioning may continue.
+                if ($this->canUseSuspensionFallback($confirmed)) {
+                    $iccid = $this->providerIccid($confirmed, $simcard);
+                    $suspendResponse = $this->provider->suspendEsim($iccid, $account);
+                    $this->assertProviderAcceptedRetirement($suspendResponse, 'suspend');
+
+                    $suspended = $this->waitForProviderSuspension($externalOrderId, $account);
+                    $this->markRetired($simcard, $suspended);
+
+                    return [
+                        'status' => 'suspended',
+                        'retirement_action' => 'suspend_after_revoke_unavailable',
+                        'provider' => $this->safeProviderStatus($suspended),
+                    ];
+                }
             }
             $this->assertProviderAcceptedRetirement($providerResponse, $retirementAction);
 
@@ -206,6 +226,23 @@ class UnusedEsimCancellationService
         throw new RuntimeException(
             'The provider has not confirmed the '.($action === 'revoke' ? 'revoked' : 'cancelled').' status yet.'
         );
+    }
+
+    private function waitForProviderSuspension(string $externalOrderId, string $account): array
+    {
+        for ($attempt = 1; $attempt <= self::PROVIDER_STATUS_ATTEMPTS; $attempt++) {
+            $esim = $this->firstProviderEsim($this->provider->queryOrder($externalOrderId, $account));
+
+            if ($this->isSuspendedWithZeroUsage($esim)) {
+                return $esim;
+            }
+
+            if ($attempt < self::PROVIDER_STATUS_ATTEMPTS) {
+                usleep(self::PROVIDER_STATUS_DELAY_MICROSECONDS);
+            }
+        }
+
+        throw new RuntimeException('The provider has not confirmed that the old eSIM is suspended yet.');
     }
 
     private function publicCancellationAction(array $esim): string
@@ -357,6 +394,38 @@ class UnusedEsimCancellationService
         // A local active/unknown state can never use this compatibility branch.
         return in_array($liveSmdpStatus, ['', 'NOT_SUPPORTED'], true)
             && $this->normalizedStatus($simcard->smdp_status) === 'DELETED';
+    }
+
+    private function canUseSuspensionFallback(array $esim): bool
+    {
+        return $esim !== []
+            && $this->usedBytes($esim) === 0
+            && in_array($this->normalizedStatus($esim['esimStatus'] ?? null), self::REVOCABLE_ESIM_STATUSES, true)
+            && in_array($this->normalizedStatus($esim['smdpStatus'] ?? null), ['', 'NOT_SUPPORTED'], true);
+    }
+
+    private function isSuspendedWithZeroUsage(array $esim): bool
+    {
+        return $esim !== []
+            && $this->usedBytes($esim) === 0
+            && (
+                $this->normalizedStatus($esim['esimStatus'] ?? null) === 'SUSPENDED'
+                || $this->normalizedStatus($esim['smdpStatus'] ?? null) === 'DISABLED'
+            );
+    }
+
+    private function providerIccid(array $esim, Simcard $simcard): string
+    {
+        $iccid = trim((string) ($esim['iccid'] ?? ''));
+        if ($iccid === '' && ! empty($simcard->iccid_enc)) {
+            $iccid = trim($this->crypto->decryptSensitiveValue((string) $simcard->iccid_enc));
+        }
+
+        if ($iccid === '') {
+            throw new RuntimeException('The provider did not return the ICCID required to suspend the old eSIM.');
+        }
+
+        return $iccid;
     }
 
     private function markRetired(Simcard $simcard, array $provider): void
