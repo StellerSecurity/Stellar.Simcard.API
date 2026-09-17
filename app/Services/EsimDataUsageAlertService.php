@@ -66,6 +66,9 @@ class EsimDataUsageAlertService
             })
             ->where('simcards.provider', self::PROVIDER)
             ->where('simcards.esim_status', 'IN_USE')
+            ->whereNotIn(DB::raw('LOWER(TRIM(simcards.state))'), [
+                'cancel', 'canceled', 'cancelled', 'revoked', 'superseded', 'retired',
+            ])
             ->whereNotExists(function ($autoTopupQuery): void {
                 $autoTopupQuery
                     ->selectRaw('1')
@@ -99,6 +102,11 @@ class EsimDataUsageAlertService
             $summary['processed']++;
 
             try {
+                if ($simcard->isLocallyRetired()) {
+                    $summary['skipped']++;
+                    continue;
+                }
+
                 if ($this->hasActiveAutoTopup((string) $simcard->id)) {
                     $summary['skipped']++;
                     continue;
@@ -152,7 +160,7 @@ class EsimDataUsageAlertService
                 }
 
                 $freshSimcard = Simcard::query()->where('id', $simcard->id)->first();
-                if ($freshSimcard === null || $this->hasActiveAutoTopup((string) $simcard->id)) {
+                if ($freshSimcard === null || $freshSimcard->isLocallyRetired() || $this->hasActiveAutoTopup((string) $simcard->id)) {
                     $summary['skipped']++;
                     continue;
                 }
@@ -225,6 +233,10 @@ class EsimDataUsageAlertService
      */
     private function refreshUsageFromProvider(Simcard $simcard): array
     {
+        if ($simcard->isLocallyRetired()) {
+            return ['status' => 'skipped', 'reason' => 'locally_retired'];
+        }
+
         if (strtoupper(trim((string) $simcard->esim_status)) !== 'IN_USE') {
             return ['status' => 'skipped', 'reason' => 'esim_not_in_use'];
         }
@@ -300,7 +312,7 @@ class EsimDataUsageAlertService
                 $remainingBytes,
             ): void {
                 $locked = Simcard::query()->where('id', $simcard->id)->lockForUpdate()->first();
-                if ($locked === null) {
+                if ($locked === null || $locked->isLocallyRetired()) {
                     return;
                 }
 
@@ -344,6 +356,9 @@ class EsimDataUsageAlertService
             // Preserve raw provider counters in simcards, but calculate customer-facing
             // alerts from the advertised virtual entitlement when quota fallback is used.
             $freshSimcard = Simcard::query()->whereKey($simcard->id)->first() ?? $simcard;
+            if ($freshSimcard->isLocallyRetired()) {
+                return ['status' => 'skipped', 'reason' => 'locally_retired'];
+            }
             $effective = $this->virtualQuotaService->effectiveUsage(
                 $freshSimcard,
                 $totalBytes,

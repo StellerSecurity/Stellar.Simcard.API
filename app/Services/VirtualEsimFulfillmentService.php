@@ -194,6 +194,10 @@ class VirtualEsimFulfillmentService
             throw new RuntimeException('Virtual eSIM could not be found.', 404);
         }
 
+        if ($simcard->isLocallyRetired()) {
+            throw new RuntimeException('A cancelled or replaced eSIM cannot receive included top-ups.', 409);
+        }
+
         $recipe = $this->lockedRecipeFromSimcard($simcard);
         $status = strtoupper(trim((string) ($recipe['status'] ?? '')));
         if ($status === 'FULFILLED') {

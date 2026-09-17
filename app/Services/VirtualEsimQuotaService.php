@@ -137,6 +137,10 @@ class VirtualEsimQuotaService
 
     public function allowsPaidTopupWhileSuspended(Simcard $simcard): bool
     {
+        if ($simcard->isLocallyRetired()) {
+            return false;
+        }
+
         if (! $this->isQuotaCapped($simcard) && ! $this->isDurationCapped($simcard)) {
             return false;
         }
@@ -156,6 +160,11 @@ class VirtualEsimQuotaService
      */
     public function restoreForPaidTopup(Simcard $simcard): void
     {
+        $simcard = $simcard->exists ? ($simcard->fresh() ?? $simcard) : $simcard;
+        if ($simcard->isLocallyRetired()) {
+            throw new RuntimeException('A cancelled or replaced eSIM cannot be reactivated for a top-up.', 409);
+        }
+
         if (! $this->allowsPaidTopupWhileSuspended($simcard)) {
             return;
         }
@@ -177,7 +186,7 @@ class VirtualEsimQuotaService
 
         DB::transaction(function () use ($simcard): void {
             $locked = Simcard::query()->whereKey($simcard->id)->lockForUpdate()->first();
-            if ($locked === null || (! $this->isQuotaCapped($locked) && ! $this->isDurationCapped($locked))) {
+            if ($locked === null || $locked->isLocallyRetired() || (! $this->isQuotaCapped($locked) && ! $this->isDurationCapped($locked))) {
                 return;
             }
 
@@ -221,7 +230,7 @@ class VirtualEsimQuotaService
 
         $result = DB::transaction(function () use ($simcard, $session): array {
             $locked = Simcard::query()->whereKey($simcard->id)->lockForUpdate()->first();
-            if ($locked === null || ! $this->isQuotaCapped($locked)) {
+            if ($locked === null || $locked->isLocallyRetired() || ! $this->isQuotaCapped($locked)) {
                 return ['applied' => false, 'needs_restore' => false];
             }
 
@@ -301,7 +310,7 @@ class VirtualEsimQuotaService
 
         DB::transaction(function () use ($simcard, $session, $addedDays): void {
             $locked = Simcard::query()->whereKey($simcard->id)->lockForUpdate()->first();
-            if ($locked === null || ! $this->isDurationCapped($locked)) {
+            if ($locked === null || $locked->isLocallyRetired() || ! $this->isDurationCapped($locked)) {
                 return;
             }
 
@@ -354,7 +363,7 @@ class VirtualEsimQuotaService
             ? $source->fresh()
             : Simcard::query()->whereKey($source)->first();
 
-        if ($simcard === null || ! $this->isQuotaCapped($simcard)) {
+        if ($simcard === null || $simcard->isLocallyRetired() || ! $this->isQuotaCapped($simcard)) {
             return ['status' => 'skipped', 'reason' => 'not_quota_capped'];
         }
 
@@ -385,7 +394,7 @@ class VirtualEsimQuotaService
 
         DB::transaction(function () use ($simcard, $usage, $entitlement): void {
             $locked = Simcard::query()->whereKey($simcard->id)->lockForUpdate()->first();
-            if ($locked === null || ! $this->isQuotaCapped($locked)) {
+            if ($locked === null || $locked->isLocallyRetired() || ! $this->isQuotaCapped($locked)) {
                 return;
             }
 
@@ -409,7 +418,7 @@ class VirtualEsimQuotaService
 
         $queued = DB::transaction(function () use ($simcard): bool {
             $locked = Simcard::query()->whereKey($simcard->id)->lockForUpdate()->first();
-            if ($locked === null || ! $this->isQuotaCapped($locked)) {
+            if ($locked === null || $locked->isLocallyRetired() || ! $this->isQuotaCapped($locked)) {
                 return false;
             }
 
@@ -545,7 +554,7 @@ class VirtualEsimQuotaService
     public function enforceSuspend(string $simcardId): array
     {
         $simcard = Simcard::query()->whereKey($simcardId)->first();
-        if ($simcard === null || ! $this->isQuotaCapped($simcard)) {
+        if ($simcard === null || $simcard->isLocallyRetired() || ! $this->isQuotaCapped($simcard)) {
             return ['status' => 'skipped'];
         }
 
@@ -577,7 +586,7 @@ class VirtualEsimQuotaService
 
         DB::transaction(function () use ($simcard): void {
             $locked = Simcard::query()->whereKey($simcard->id)->lockForUpdate()->first();
-            if ($locked === null || ! $this->isQuotaCapped($locked)) {
+            if ($locked === null || $locked->isLocallyRetired() || ! $this->isQuotaCapped($locked)) {
                 return;
             }
 
@@ -612,7 +621,7 @@ class VirtualEsimQuotaService
         // suspension against the old quota.
         $final = DB::transaction(function () use ($simcard): array {
             $locked = Simcard::query()->whereKey($simcard->id)->lockForUpdate()->first();
-            if ($locked === null || ! $this->isQuotaCapped($locked)) {
+            if ($locked === null || $locked->isLocallyRetired() || ! $this->isQuotaCapped($locked)) {
                 return ['action' => 'skip'];
             }
 
@@ -675,6 +684,11 @@ class VirtualEsimQuotaService
     /** @return array<string,mixed> */
     private function restoreAfterQuotaExtension(Simcard $simcard, int $usage, int $entitlement): array
     {
+        $simcard = $simcard->fresh() ?? $simcard;
+        if ($simcard->isLocallyRetired()) {
+            return ['status' => 'skipped', 'reason' => 'esim_locally_retired'];
+        }
+
         $iccid = $this->decryptIccid($simcard);
         if ($iccid === null) {
             throw new RuntimeException('Quota-capped eSIM ICCID is not available for quota restore.', 503);
@@ -692,7 +706,7 @@ class VirtualEsimQuotaService
 
         DB::transaction(function () use ($simcard, $usage, $entitlement): void {
             $locked = Simcard::query()->whereKey($simcard->id)->lockForUpdate()->first();
-            if ($locked === null || ! $this->isQuotaCapped($locked)) {
+            if ($locked === null || $locked->isLocallyRetired() || ! $this->isQuotaCapped($locked)) {
                 return;
             }
 
@@ -736,7 +750,7 @@ class VirtualEsimQuotaService
             ? $source->fresh()
             : Simcard::query()->whereKey($source)->first();
 
-        if ($simcard === null || ! $this->isDurationCapped($simcard)) {
+        if ($simcard === null || $simcard->isLocallyRetired() || ! $this->isDurationCapped($simcard)) {
             return ['status' => 'skipped', 'reason' => 'not_duration_capped'];
         }
 
@@ -770,7 +784,7 @@ class VirtualEsimQuotaService
             $expiry = $simcard->activated_at->copy()->addDays($entitledDays);
             DB::transaction(function () use ($simcard, $expiry): void {
                 $locked = Simcard::query()->whereKey($simcard->id)->lockForUpdate()->first();
-                if ($locked === null || ! $this->isDurationCapped($locked)) {
+                if ($locked === null || $locked->isLocallyRetired() || ! $this->isDurationCapped($locked)) {
                     return;
                 }
 
@@ -795,7 +809,7 @@ class VirtualEsimQuotaService
 
         $queued = DB::transaction(function () use ($simcard): bool {
             $locked = Simcard::query()->whereKey($simcard->id)->lockForUpdate()->first();
-            if ($locked === null || ! $this->isDurationCapped($locked)) {
+            if ($locked === null || $locked->isLocallyRetired() || ! $this->isDurationCapped($locked)) {
                 return false;
             }
 
@@ -890,7 +904,7 @@ class VirtualEsimQuotaService
     public function enforceDurationSuspend(string $simcardId): array
     {
         $simcard = Simcard::query()->whereKey($simcardId)->first();
-        if ($simcard === null || ! $this->isDurationCapped($simcard)) {
+        if ($simcard === null || $simcard->isLocallyRetired() || ! $this->isDurationCapped($simcard)) {
             return ['status' => 'skipped'];
         }
 
@@ -917,7 +931,7 @@ class VirtualEsimQuotaService
 
         $shouldSuspend = DB::transaction(function () use ($simcard): bool {
             $locked = Simcard::query()->whereKey($simcard->id)->lockForUpdate()->first();
-            if ($locked === null || ! $this->isDurationCapped($locked)) {
+            if ($locked === null || $locked->isLocallyRetired() || ! $this->isDurationCapped($locked)) {
                 return false;
             }
             $recipe = (array) $locked->virtual_fulfillment_recipe;
@@ -961,7 +975,7 @@ class VirtualEsimQuotaService
 
         $final = DB::transaction(function () use ($simcard): string {
             $locked = Simcard::query()->whereKey($simcard->id)->lockForUpdate()->first();
-            if ($locked === null || ! $this->isDurationCapped($locked)) {
+            if ($locked === null || $locked->isLocallyRetired() || ! $this->isDurationCapped($locked)) {
                 return 'skip';
             }
             $recipe = (array) $locked->virtual_fulfillment_recipe;
@@ -1006,7 +1020,7 @@ class VirtualEsimQuotaService
     {
         DB::transaction(function () use ($simcardId, $reason): void {
             $simcard = Simcard::query()->whereKey($simcardId)->lockForUpdate()->first();
-            if ($simcard === null || ! $this->isDurationCapped($simcard)) {
+            if ($simcard === null || $simcard->isLocallyRetired() || ! $this->isDurationCapped($simcard)) {
                 return;
             }
 
@@ -1028,7 +1042,7 @@ class VirtualEsimQuotaService
     {
         DB::transaction(function () use ($simcard, $state): void {
             $locked = Simcard::query()->whereKey($simcard->id)->lockForUpdate()->first();
-            if ($locked === null || ! $this->isDurationCapped($locked)) {
+            if ($locked === null || $locked->isLocallyRetired() || ! $this->isDurationCapped($locked)) {
                 return;
             }
 
@@ -1065,7 +1079,7 @@ class VirtualEsimQuotaService
     private function updateSuspendFailureState(string $simcardId, string $state, string $reason): void
     {
         $simcard = Simcard::query()->whereKey($simcardId)->first();
-        if ($simcard === null || ! $this->isQuotaCapped($simcard)) {
+        if ($simcard === null || $simcard->isLocallyRetired() || ! $this->isQuotaCapped($simcard)) {
             return;
         }
 
@@ -1114,7 +1128,7 @@ class VirtualEsimQuotaService
 
         DB::transaction(function () use ($simcard, $providerStatus, $smdpStatus, $totalBytes, $usage, $remaining, $account): void {
             $locked = Simcard::query()->whereKey($simcard->id)->lockForUpdate()->first();
-            if ($locked === null || ! $this->isQuotaCapped($locked)) {
+            if ($locked === null || $locked->isLocallyRetired() || ! $this->isQuotaCapped($locked)) {
                 return;
             }
 

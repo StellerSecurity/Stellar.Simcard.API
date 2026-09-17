@@ -118,29 +118,24 @@ class UnusedEsimCancellationService
                     ];
                 }
 
-                // Some installed zero-usage profiles remain queryable but reject
-                // permanent revoke with 200002. Do not issue a second live profile
-                // while the old one can still carry data: suspend it, then require a
-                // fresh provider confirmation of SUSPENDED/DISABLED and exactly zero
-                // usage before replacement provisioning may continue. A small subset
-                // of one-time profiles rejects both revoke and suspend with 200002.
-                // When that happens, re-query once more and locally supersede the old
-                // profile only while the provider still reports exactly zero usage,
-                // IN_USE/SUSPENDED/USED_UP, and no supported SM-DP lifecycle. This
-                // prevents future top-ups and lets support issue the customer-approved
-                // replacement without weakening the positive/unknown-usage guards.
+                // Try provider suspension first. If the provider explicitly rejects
+                // it, the approved last resort is local supersession of an IN_USE,
+                // NOT_SUPPORTED profile with a fresh, exact zero-byte reading.
+                // Transport failures or ambiguous responses never authorize this.
                 if ($this->canUseSuspensionFallback($confirmed)) {
                     $suspendResponse = $this->provider->suspendEsimByTransaction($esimTranNo, $account);
 
-                    if ($this->statusDoesNotSupportAction($suspendResponse)) {
+                    if ($this->providerRejectedAction($suspendResponse)) {
                         $superseded = $this->firstProviderEsim($this->provider->queryOrder($externalOrderId, $account));
-                        if ($this->canUseSuspensionFallback($superseded)) {
+                        if ($this->canLocallySupersede($confirmed) && $this->canLocallySupersede($superseded)) {
                             Log::warning('Provider refused revoke and suspend for a zero-use one-time eSIM; superseding locally for replacement.', [
                                 'external_order_id' => $externalOrderId,
                                 'provider_account' => $account,
                                 'esim_status' => $this->normalizedStatus($superseded['esimStatus'] ?? null),
                                 'smdp_status' => $this->normalizedStatus($superseded['smdpStatus'] ?? null),
                                 'used_bytes' => $this->usedBytes($superseded),
+                                'revoke_error_code' => $this->providerErrorCode($providerResponse),
+                                'suspend_error_code' => $this->providerErrorCode($suspendResponse),
                             ]);
                             $this->markRetired($simcard, $superseded);
 
@@ -377,31 +372,57 @@ class UnusedEsimCancellationService
 
     private function assertProviderAcceptedRetirement(array $response, string $action): void
     {
-        $success = data_get($response, 'success');
-        $errorCode = trim((string) (data_get($response, 'errorCode') ?? data_get($response, 'code') ?? ''));
+        $errorCode = $this->providerErrorCode($response);
+        $detail = $errorCode !== '' ? ' Provider error code: '.$errorCode.'.' : '';
 
-        $successIsFalse = $success === false
-            || (is_string($success) && in_array(strtolower(trim($success)), ['false', '0', 'no'], true))
-            || (is_int($success) && $success === 0);
-
-        if ($successIsFalse || ($errorCode !== '' && ! in_array($errorCode, ['0', '000000'], true))) {
+        if ($this->providerRejectedAction($response)) {
             if (in_array($errorCode, ['200002', '200009', '200010'], true)) {
-                throw new \DomainException('The provider reports that this eSIM is no longer eligible for '.$action.'.');
+                throw new \DomainException('The provider reports that this eSIM is no longer eligible for '.$action.'.'.$detail);
             }
 
-            throw new RuntimeException('The provider rejected the '.$action.' request.');
+            throw new RuntimeException('The provider rejected the '.$action.' request.'.$detail);
         }
+
+        $success = $response['success'] ?? null;
+        if (! in_array($success, [true, 1, 'true', '1'], true)
+            && ! in_array($errorCode, ['0', '000000'], true)) {
+            throw new RuntimeException('The provider did not return a recognized '.$action.' result.');
+        }
+    }
+
+    private function providerRejectedAction(array $response): bool
+    {
+        $success = $response['success'] ?? null;
+        $errorCode = $this->providerErrorCode($response);
+
+        return $success === false || $success === 0
+            || (is_string($success) && in_array(strtolower(trim($success)), ['false', '0', 'no'], true))
+            || ($errorCode !== '' && ! in_array($errorCode, ['0', '000000'], true));
+    }
+
+    private function providerErrorCode(array $response): string
+    {
+        $value = $response['errorCode'] ?? $response['code'] ?? null;
+        if (! is_string($value) && ! is_int($value)) {
+            return '';
+        }
+
+        $code = trim((string) $value);
+
+        // Report the provider code, never arbitrary response text or identifiers.
+        return preg_match('/^[0-9]{1,6}$/D', $code) === 1 ? $code : '';
     }
 
     private function statusDoesNotSupportAction(array $response): bool
     {
-        $errorCode = trim((string) (data_get($response, 'errorCode') ?? data_get($response, 'code') ?? ''));
+        return $this->providerErrorCode($response) === '200002';
+    }
 
-        // eSIMAccess does not consistently include a top-level success=false
-        // field for business errors. The exact provider code is authoritative;
-        // the caller still performs a fresh DELETED + 0-byte verification before
-        // treating the profile as safely retired.
-        return $errorCode === '200002';
+    private function canLocallySupersede(array $esim): bool
+    {
+        return $this->usedBytes($esim) === 0
+            && $this->normalizedStatus($esim['esimStatus'] ?? null) === 'IN_USE'
+            && $this->normalizedStatus($esim['smdpStatus'] ?? null) === 'NOT_SUPPORTED';
     }
 
     private function isSafelyUnavailableWithZeroUsage(array $esim, Simcard $simcard): bool
@@ -545,7 +566,18 @@ class UnusedEsimCancellationService
     {
         $value = $esim['orderUsage'] ?? null;
 
-        return is_numeric($value) ? max(0, (int) $value) : null;
+        if (is_int($value)) {
+            return $value >= 0 ? $value : null;
+        }
+        if (is_string($value) && preg_match('/^[0-9]+$/D', $value) === 1) {
+            return (int) $value;
+        }
+        if (is_float($value) && is_finite($value) && $value >= 0
+            && $value < PHP_INT_MAX && floor($value) === $value) {
+            return (int) $value;
+        }
+
+        return null;
     }
 
     private function activationTime(array $esim): ?string

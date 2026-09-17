@@ -43,6 +43,10 @@ class EsimMarketingRefundOfferService
                 return ['status' => 'missing_simcard'];
             }
 
+            if ($locked->isLocallyRetired()) {
+                return ['status' => 'locally_retired'];
+            }
+
             $detectedAt = now();
 
             if ($locked->first_used_at === null) {

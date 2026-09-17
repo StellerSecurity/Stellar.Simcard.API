@@ -251,7 +251,7 @@ class EsimaccessWebhookService
         $simcardId = $this->nullableString($result['simcard_id'] ?? null);
         $simcard = $simcardId === null ? null : Simcard::find($simcardId);
 
-        if ($simcard === null || $this->isWholesaleSimcard($simcard)) {
+        if ($simcard === null || $simcard->isLocallyRetired() || $this->isWholesaleSimcard($simcard)) {
             return;
         }
 
@@ -343,6 +343,7 @@ class EsimaccessWebhookService
         if ($externalOrderIdHash !== null) {
             $simcard = Simcard::where('provider', self::PROVIDER)
                 ->where('external_order_id_hash', $externalOrderIdHash)
+                ->lockForUpdate()
                 ->first();
 
             if ($simcard !== null) {
@@ -353,6 +354,7 @@ class EsimaccessWebhookService
         if ($iccidHash !== null) {
             return Simcard::where('provider', self::PROVIDER)
                 ->where('iccid_hash', $iccidHash)
+                ->lockForUpdate()
                 ->first();
         }
 
@@ -409,7 +411,7 @@ class EsimaccessWebhookService
             $simcard->smdp_status = $smdpStatus;
         }
 
-        if ($esimStatus === 'IN_USE') {
+        if ($esimStatus === 'IN_USE' && ! $simcard->isLocallyRetired()) {
             $simcard->state = 'active';
             $simcard->activated_at = $simcard->activated_at ?? now();
         }
@@ -487,6 +489,10 @@ class EsimaccessWebhookService
                 'status' => 'skipped',
                 'reason' => 'missing_simcard',
             ];
+        }
+
+        if ($simcard->isLocallyRetired()) {
+            return ['status' => 'skipped', 'reason' => 'locally_retired'];
         }
 
         if ($this->isWholesaleSimcard($simcard)) {
@@ -586,6 +592,10 @@ class EsimaccessWebhookService
                 'status' => 'skipped',
                 'reason' => 'missing_simcard',
             ];
+        }
+
+        if ($simcard->isLocallyRetired()) {
+            return ['status' => 'skipped', 'reason' => 'locally_retired'];
         }
 
         if ($this->isWholesaleSimcard($simcard)) {

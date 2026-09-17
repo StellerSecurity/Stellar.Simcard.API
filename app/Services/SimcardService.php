@@ -298,11 +298,11 @@ class SimcardService
         $hasUsage = is_numeric($safeProvider['used_bytes'] ?? null)
             && (int) $safeProvider['used_bytes'] > 0;
 
-        if ($isInUse || $hasUsage) {
+        if (($isInUse || $hasUsage) && ! $simcard->isLocallyRetired()) {
             $this->marketingRefundOffer->handleUsageDetected($simcard);
             $simcard->refresh();
 
-            if ($simcard->activated_at === null) {
+            if ($simcard->activated_at === null && ! $simcard->isLocallyRetired()) {
                 $simcard->activated_at = now();
                 $simcard->state = 'active';
                 $simcard->save();
@@ -866,7 +866,8 @@ class SimcardService
             ));
 
             if ($this->installPayloadReady($best)) {
-                if ($simcard->state !== 'OK') {
+                $simcard->refresh();
+                if (! $simcard->isLocallyRetired() && $simcard->state !== 'OK') {
                     $simcard->state = 'OK';
                     $simcard->save();
                 }

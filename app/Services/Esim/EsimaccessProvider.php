@@ -4,6 +4,7 @@ namespace App\Services\Esim;
 
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\RequestException;
+use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -227,18 +228,7 @@ class EsimaccessProvider implements EsimProvider
             ->withHeaders($this->createHeaders($payload, $account))
             ->post($this->baseUrl . '/v1/open/esim/cancel', $payload);
 
-        $body = $response->json();
-
-        // Provider eligibility failures are valid business responses. Return
-        // JSON bodies to the caller so they can be mapped without hiding the
-        // provider's state behind a generic HTTP exception.
-        if (is_array($body)) {
-            return $body;
-        }
-
-        $response->throw();
-
-        throw new RuntimeException('The eSIMAccess cancellation response was not valid JSON.');
+        return $this->retirementResponse($response, 'cancellation');
     }
 
     public function revokeEsim(string $esimTranNo, string $account = self::ACCOUNT_PRIMARY): array
@@ -249,17 +239,7 @@ class EsimaccessProvider implements EsimProvider
             ->withHeaders($this->createHeaders($payload, $account))
             ->post($this->baseUrl . '/v1/open/esim/revoke', $payload);
 
-        $body = $response->json();
-
-        // A lifecycle conflict is a valid provider response. Return its structured
-        // body so the guarded replacement service can map it without exposing it.
-        if (is_array($body)) {
-            return $body;
-        }
-
-        $response->throw();
-
-        throw new RuntimeException('The eSIMAccess revoke response was not valid JSON.');
+        return $this->retirementResponse($response, 'revoke');
     }
 
     public function suspendEsim(string $iccid, string $account = self::ACCOUNT_PRIMARY): array
@@ -281,14 +261,24 @@ class EsimaccessProvider implements EsimProvider
             ->withHeaders($this->createHeaders($payload, $account))
             ->post($this->baseUrl . '/v1/open/esim/suspend', $payload);
 
+        return $this->retirementResponse($response, 'suspension');
+    }
+
+    private function retirementResponse(Response $response, string $action): array
+    {
+        // Only successful HTTP responses or explicit business-validation statuses
+        // may carry a provider rejection. Outages, authentication errors and rate
+        // limits are not evidence that retiring the old profile is impossible.
+        if (! $response->successful() && ! in_array($response->status(), [400, 409, 422], true)) {
+            throw new RuntimeException('The eSIMAccess '.$action.' request failed with HTTP '.$response->status().'.');
+        }
+
         $body = $response->json();
-        if (is_array($body)) {
+        if (is_array($body) && ! array_is_list($body)) {
             return $body;
         }
 
-        $response->throw();
-
-        throw new RuntimeException('The eSIMAccess suspension response was not valid JSON.');
+        throw new RuntimeException('The eSIMAccess '.$action.' response was not a valid JSON object.');
     }
 
     public function unsuspendEsim(string $iccid, string $account = self::ACCOUNT_PRIMARY): array

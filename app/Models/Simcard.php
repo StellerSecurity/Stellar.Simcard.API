@@ -11,6 +11,14 @@ class Simcard extends Model
 
     public $timestamps = false;
 
+    /** Local retirement stays authoritative even when the provider cannot revoke a profile. */
+    public function isLocallyRetired(): bool
+    {
+        return in_array(strtolower(trim((string) $this->state)), [
+            'cancel', 'canceled', 'cancelled', 'revoked', 'superseded', 'retired',
+        ], true);
+    }
+
     protected $casts = [
         'purchased_on' => 'datetime',
         'expires_at' => 'datetime',
