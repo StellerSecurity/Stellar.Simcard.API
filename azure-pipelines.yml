@@ -88,6 +88,10 @@ stages:
           tests/Feature/AutoTopupPaymentRecoveryEndpointTest.php \
           tests/Feature/AutoTopupPaymentRecoveryStateTest.php \
           tests/Feature/SupportReplacementRetirementTest.php \
+          tests/Feature/ReplacementFallbackSafetyTest.php \
+          tests/Feature/RetiredEsimTopupSafetyTest.php \
+          tests/Feature/RetiredEsimStatePreservationTest.php \
+          tests/Unit/ReplacementProviderResponseTest.php \
           tests/Feature/WholesaleSupportInspectionTest.php
       workingDirectory: $(rootFolder)
       displayName: 'Verify migrations, Auto Top-Up and support replacement flows'

@@ -40,6 +40,14 @@ class EsimAutoTopupManagementService
         $simcard = $this->resolveSimcard($planId);
         $config = SimcardAutoTopup::query()->where('simcard_id', $simcard->id)->first();
 
+        if ($simcard->isLocallyRetired()) {
+            if ($config !== null && $config->enabled) {
+                $config = $this->disableLocal($config, 'esim_locally_retired', false);
+            }
+
+            return $this->buildStatus($simcard, $config, null, 'esim_locally_retired');
+        }
+
         if (! $this->hasCommerceBinding($simcard)) {
             return $this->buildStatus($simcard, $config, null, 'commerce_purchase_unavailable');
         }
@@ -116,6 +124,10 @@ class EsimAutoTopupManagementService
         $version = trim($version) !== '' ? mb_substr(trim($version), 0, 32) : '1';
 
         if ($enabled) {
+            if ($simcard->isLocallyRetired()) {
+                throw new RuntimeException('Auto Top-Up cannot be enabled for a cancelled or replaced eSIM.', 409);
+            }
+
             if (! $consent) {
                 throw new RuntimeException('Auto Top-Up consent is required.', 422);
             }
@@ -183,6 +195,10 @@ class EsimAutoTopupManagementService
 
             if ($lockedSimcard === null) {
                 throw new RuntimeException('eSIM was not found.', 404);
+            }
+
+            if ($lockedSimcard->isLocallyRetired()) {
+                throw new RuntimeException('Auto Top-Up cannot be enabled for a cancelled or replaced eSIM.', 409);
             }
 
             if (! $this->hasCommerceBinding($lockedSimcard)) {

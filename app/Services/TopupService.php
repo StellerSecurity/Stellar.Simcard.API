@@ -200,6 +200,8 @@ class TopupService
             ];
         }
 
+        $this->assertNotLocallyRetired($simcard);
+
         return $this->createCommerceCheckout(
             $commerceUrl,
             $session,
@@ -522,6 +524,9 @@ class TopupService
             throw new RuntimeException('Top-up eSIM could not be found.', 404);
         }
 
+        // A paid callback must never revive a profile retired by a replacement.
+        // Leave existing payment/session evidence intact for reconciliation.
+        $this->assertNotLocallyRetired($simcard);
         $restoredEntitlementProfileForPaidTopup = false;
 
         if ($this->isIncludedVirtualTopupSession($session)) {
@@ -562,6 +567,8 @@ class TopupService
                 $account,
             );
 
+            // Provider catalogue requests can outlive a concurrent retirement.
+            $this->assertNotLocallyRetired($simcard->refresh());
             $providerResponse = $this->provider->topup($iccid, $providerTopupValue, $transactionId, $account);
             $redactedProviderResponse = $this->redactProviderPayload($providerResponse);
 
@@ -1462,8 +1469,18 @@ class TopupService
         return $value;
     }
 
+    private function assertNotLocallyRetired(Simcard $simcard): void
+    {
+        $simcard = $simcard->exists ? ($simcard->fresh() ?? $simcard) : $simcard;
+        if ($simcard->isLocallyRetired()) {
+            throw new RuntimeException('This eSIM has been cancelled or replaced and can no longer be topped up.', 409);
+        }
+    }
+
     private function assertAutoTopupEligible(Simcard $simcard): void
     {
+        $this->assertNotLocallyRetired($simcard);
+
         if (! in_array(strtoupper(trim((string) $simcard->esim_status)), ['IN_USE', 'USED_UP'], true)) {
             throw new RuntimeException('Auto Top-Up only runs while the eSIM is active or used up.', 409);
         }
@@ -1484,6 +1501,8 @@ class TopupService
      */
     private function assertIncludedVirtualTopupEligible(Simcard $simcard): void
     {
+        $this->assertNotLocallyRetired($simcard);
+
         $status = strtoupper(trim((string) $simcard->esim_status));
 
         foreach (['EXPIRED', 'CANCEL', 'CANCELED', 'CANCELLED', 'REVOKED'] as $terminal) {
@@ -1495,6 +1514,8 @@ class TopupService
 
     private function assertTopupEligible(Simcard $simcard): void
     {
+        $this->assertNotLocallyRetired($simcard);
+
         $providerStatus = strtoupper(trim((string) $simcard->esim_status));
         $fallbackState = strtolower(trim((string) $simcard->state));
 

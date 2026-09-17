@@ -99,6 +99,10 @@ class EsimAutoTopupService
                 throw new RuntimeException('Auto Top-Up Commerce ownership does not match the provisioned eSIM.', 409);
             }
 
+            if ($lockedSimcard->isLocallyRetired()) {
+                throw new RuntimeException('Auto Top-Up cannot be enabled for a cancelled or replaced eSIM.', 409);
+            }
+
             $config = SimcardAutoTopup::query()
                 ->where('simcard_id', $lockedSimcard->id)
                 ->lockForUpdate()
@@ -171,6 +175,10 @@ class EsimAutoTopupService
         $simcard = is_string($simcard) ? Simcard::find($simcard) : $simcard->fresh();
         if ($simcard === null) {
             return ['status' => 'skipped', 'reason' => 'simcard_not_found'];
+        }
+
+        if ($simcard->isLocallyRetired()) {
+            return ['status' => 'skipped', 'reason' => 'esim_locally_retired'];
         }
 
         $config = SimcardAutoTopup::query()
@@ -415,6 +423,10 @@ class EsimAutoTopupService
      */
     private function refreshUsageFromProvider(Simcard $simcard): array
     {
+        if ($simcard->isLocallyRetired()) {
+            return ['status' => 'skipped', 'reason' => 'esim_locally_retired'];
+        }
+
         if (! $this->isAutoTopupLifecycleEligible($simcard->esim_status)) {
             return ['status' => 'skipped', 'reason' => 'esim_not_in_use'];
         }
@@ -477,7 +489,7 @@ class EsimAutoTopupService
                 $remainingBytes,
             ): void {
                 $locked = Simcard::query()->where('id', $simcard->id)->lockForUpdate()->first();
-                if ($locked === null) {
+                if ($locked === null || $locked->isLocallyRetired()) {
                     return;
                 }
 
@@ -786,7 +798,7 @@ class EsimAutoTopupService
             // Use the same SIM -> config lock order as management/provisioning.
             // The final config checks below remain authoritative.
             $simcard = Simcard::query()->where('id', $simcardId)->lockForUpdate()->first();
-            if ($simcard === null || ! $this->isAutoTopupLifecycleEligible($simcard->esim_status)) {
+            if ($simcard === null || $simcard->isLocallyRetired() || ! $this->isAutoTopupLifecycleEligible($simcard->esim_status)) {
                 return [null, null];
             }
 
@@ -994,12 +1006,31 @@ class EsimAutoTopupService
                 || trim((string) $attempt->commerce_order_id) !== ''
                 || trim((string) $attempt->stripe_payment_intent_id) !== '';
 
-            if (! $config->enabled && ! $paymentBoundaryStarted) {
+            $simcard = Simcard::query()->whereKey($config->simcard_id)->first();
+            $retired = $simcard === null || $simcard->isLocallyRetired();
+            if ($retired && $paymentBoundaryStarted) {
+                // Do not issue another payment request for a retired profile. Keep
+                // payment identifiers and the in-flight attempt for reconciliation.
+                $reason = 'The eSIM was cancelled or replaced after payment started; payment reconciliation is required.';
+                $attempt->failure_reason = $reason;
+                $attempt->meta = array_merge($meta, ['retired_esim_payment_reconciliation_required' => true]);
+                $attempt->save();
+                $config->enabled = false;
+                $config->failure_reason = $reason;
+                $config->save();
+
+                return false;
+            }
+
+            if (($retired || ! $config->enabled) && ! $paymentBoundaryStarted) {
                 $now = now();
                 $attempt->status = self::ATTEMPT_FAILED;
-                $attempt->failure_reason = 'Auto Top-Up was disabled before payment started.';
+                $reason = $retired
+                    ? 'The eSIM was cancelled or replaced before payment started.'
+                    : 'Auto Top-Up was disabled before payment started.';
+                $attempt->failure_reason = $reason;
                 $attempt->meta = array_merge($meta, [
-                    'cancelled_by_customer_at' => $now->toIso8601String(),
+                    ($retired ? 'cancelled_for_retired_esim_at' : 'cancelled_by_customer_at') => $now->toIso8601String(),
                     'cancelled_before_payment' => true,
                 ]);
                 $attempt->save();
@@ -1016,13 +1047,14 @@ class EsimAutoTopupService
                         && trim((string) $session->commerce_order_id) === ''
                     ) {
                         $session->status = 'CANCELLED';
-                        $session->failure_reason = 'Auto Top-Up was disabled before payment started.';
+                        $session->failure_reason = $reason;
                         $session->save();
                     }
                 }
 
                 $configMeta = is_array($config->meta) ? $config->meta : [];
                 $configMeta['state_before_disable'] = self::STATE_ARMED;
+                $config->enabled = false;
                 $config->state = self::STATE_DISABLED;
                 $config->failure_reason = null;
                 $config->meta = $configMeta;
