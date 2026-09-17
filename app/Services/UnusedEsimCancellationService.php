@@ -74,6 +74,20 @@ class UnusedEsimCancellationService
                 ];
             }
 
+            // A provider-confirmed SM-DP DELETED profile has already lost its
+            // downloadable installation package and cannot be revoked again.
+            // For replacements, accept that terminal profile state only when
+            // the same fresh provider response reports exactly zero usage.
+            if ($forReplacement && $this->isDeletedWithZeroUsage($before)) {
+                $this->markRetired($simcard, $before);
+
+                return [
+                    'status' => 'already_deleted',
+                    'retirement_action' => 'provider_profile_already_deleted',
+                    'provider' => $this->safeProviderStatus($before),
+                ];
+            }
+
             $retirementAction = $forReplacement
                 ? $this->replacementRetirementAction($before)
                 : $this->publicCancellationAction($before);
