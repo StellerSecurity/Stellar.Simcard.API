@@ -78,7 +78,7 @@ class UnusedEsimCancellationService
             // downloadable installation package and cannot be revoked again.
             // For replacements, accept that terminal profile state only when
             // the same fresh provider response reports exactly zero usage.
-            if ($forReplacement && $this->isDeletedWithZeroUsage($before)) {
+            if ($forReplacement && $this->isSafelyUnavailableWithZeroUsage($before, $simcard)) {
                 $this->markRetired($simcard, $before);
 
                 return [
@@ -108,7 +108,7 @@ class UnusedEsimCancellationService
             // still reports DELETED. Any other lifecycle remains blocked.
             if ($retirementAction === 'revoke' && $this->statusDoesNotSupportAction($providerResponse)) {
                 $confirmed = $this->firstProviderEsim($this->provider->queryOrder($externalOrderId, $account));
-                if ($this->isDeletedWithZeroUsage($confirmed)) {
+                if ($this->isSafelyUnavailableWithZeroUsage($confirmed, $simcard)) {
                     $this->markRetired($simcard, $confirmed);
 
                     return [
@@ -340,11 +340,23 @@ class UnusedEsimCancellationService
         return $errorCode === '200002';
     }
 
-    private function isDeletedWithZeroUsage(array $esim): bool
+    private function isSafelyUnavailableWithZeroUsage(array $esim, Simcard $simcard): bool
     {
-        return $esim !== []
-            && $this->normalizedStatus($esim['smdpStatus'] ?? null) === 'DELETED'
-            && $this->usedBytes($esim) === 0;
+        if ($esim === [] || $this->usedBytes($esim) !== 0) {
+            return false;
+        }
+
+        $liveSmdpStatus = $this->normalizedStatus($esim['smdpStatus'] ?? null);
+        if ($liveSmdpStatus === 'DELETED') {
+            return true;
+        }
+
+        // Some eSIMAccess query responses stop exposing SM-DP state after the
+        // profile is deleted and report NOT_SUPPORTED (or omit it). Accept that
+        // only when our last provider-confirmed persisted state is DELETED.
+        // A local active/unknown state can never use this compatibility branch.
+        return in_array($liveSmdpStatus, ['', 'NOT_SUPPORTED'], true)
+            && $this->normalizedStatus($simcard->smdp_status) === 'DELETED';
     }
 
     private function markRetired(Simcard $simcard, array $provider): void
