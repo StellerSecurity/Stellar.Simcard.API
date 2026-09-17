@@ -86,6 +86,24 @@ class UnusedEsimCancellationService
             $providerResponse = $retirementAction === 'revoke'
                 ? $this->provider->revokeEsim($esimTranNo, $account)
                 : $this->provider->cancelEsim($esimTranNo, $account);
+
+            // eSIMAccess returns 200002 when an already deleted device profile no
+            // longer supports the revoke operation. In that one state, the old QR
+            // cannot be installed again. Re-query immediately and accept it as
+            // retired only while provider usage is still exactly zero and SM-DP
+            // still reports DELETED. Any other lifecycle remains blocked.
+            if ($retirementAction === 'revoke' && $this->statusDoesNotSupportAction($providerResponse)) {
+                $confirmed = $this->firstProviderEsim($this->provider->queryOrder($externalOrderId, $account));
+                if ($this->isDeletedWithZeroUsage($confirmed)) {
+                    $this->markRetired($simcard, $confirmed);
+
+                    return [
+                        'status' => 'already_deleted',
+                        'retirement_action' => 'revoke_unavailable_profile_deleted',
+                        'provider' => $this->safeProviderStatus($confirmed),
+                    ];
+                }
+            }
             $this->assertProviderAcceptedRetirement($providerResponse, $retirementAction);
 
             $after = $this->waitForProviderRetirement($externalOrderId, $account, $retirementAction);
@@ -295,6 +313,24 @@ class UnusedEsimCancellationService
 
             throw new RuntimeException('The provider rejected the '.$action.' request.');
         }
+    }
+
+    private function statusDoesNotSupportAction(array $response): bool
+    {
+        $success = data_get($response, 'success');
+        $errorCode = trim((string) (data_get($response, 'errorCode') ?? data_get($response, 'code') ?? ''));
+        $failed = $success === false
+            || (is_string($success) && in_array(strtolower(trim($success)), ['false', '0', 'no'], true))
+            || (is_int($success) && $success === 0);
+
+        return $failed && $errorCode === '200002';
+    }
+
+    private function isDeletedWithZeroUsage(array $esim): bool
+    {
+        return $esim !== []
+            && $this->normalizedStatus($esim['smdpStatus'] ?? null) === 'DELETED'
+            && $this->usedBytes($esim) === 0;
     }
 
     private function markRetired(Simcard $simcard, array $provider): void
