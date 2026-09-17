@@ -178,6 +178,58 @@ it('does not provision after a suspension fallback until the provider confirms i
         ->toThrow(RuntimeException::class, 'has not confirmed that the old eSIM is suspended');
 });
 
+it('locally supersedes an unused one-time profile when revoke and suspend are both unavailable', function (): void {
+    $planId = '4538034324401446';
+    $crypto = app(EsimCryptoService::class);
+    $simcard = supportRetirementSimcard($planId, $crypto);
+    $simcard->forceFill(['smdp_status' => 'ENABLED'])->save();
+
+    $before = supportRetirementProfile('NOT_SUPPORTED', 'IN_USE', 0);
+    $provider = Mockery::mock(EsimProvider::class);
+    $provider->shouldReceive('queryOrder')->times(3)->andReturn($before);
+    $provider->shouldReceive('revokeEsim')->once()->andReturn(['errorCode' => '200002']);
+    $provider->shouldReceive('suspendEsimByTransaction')
+        ->once()
+        ->with('26091323430015', 'primary')
+        ->andReturn(['errorCode' => '200002']);
+    $provider->shouldReceive('cancelEsim')->never();
+
+    $result = (new UnusedEsimCancellationService($provider, $crypto))->retireForReplacement($planId);
+
+    expect($result)->toMatchArray([
+        'status' => 'superseded',
+        'retirement_action' => 'local_supersede_after_provider_actions_unavailable',
+        'provider_retired' => false,
+    ])->and($simcard->fresh()->state)->toBe('cancelled')
+        ->and($simcard->fresh()->esim_status)->toBe('IN_USE')
+        ->and($simcard->fresh()->smdp_status)->toBe('NOT_SUPPORTED')
+        ->and((int) $simcard->fresh()->order_usage)->toBe(0)
+        ->and((int) $simcard->fresh()->remaining_volume)->toBe(0);
+});
+
+it('does not locally supersede when usage changes after provider actions fail', function (): void {
+    $planId = '4538034324401446';
+    $crypto = app(EsimCryptoService::class);
+    supportRetirementSimcard($planId, $crypto)->forceFill(['smdp_status' => 'ENABLED'])->save();
+
+    $provider = Mockery::mock(EsimProvider::class);
+    $provider->shouldReceive('queryOrder')
+        ->once()
+        ->andReturn(supportRetirementProfile('NOT_SUPPORTED', 'IN_USE', 0));
+    $provider->shouldReceive('revokeEsim')->once()->andReturn(['errorCode' => '200002']);
+    $provider->shouldReceive('queryOrder')
+        ->once()
+        ->andReturn(supportRetirementProfile('NOT_SUPPORTED', 'IN_USE', 0));
+    $provider->shouldReceive('suspendEsimByTransaction')->once()->andReturn(['errorCode' => '200002']);
+    $provider->shouldReceive('queryOrder')
+        ->once()
+        ->andReturn(supportRetirementProfile('NOT_SUPPORTED', 'IN_USE', 1));
+    $provider->shouldReceive('cancelEsim')->never();
+
+    expect(fn () => (new UnusedEsimCancellationService($provider, $crypto))->retireForReplacement($planId))
+        ->toThrow(DomainException::class, 'no longer eligible for suspend');
+});
+
 it('keeps the ordinary cancellation path from silently revoking installed profiles', function (): void {
     $planId = '4538034324401446';
     $crypto = app(EsimCryptoService::class);

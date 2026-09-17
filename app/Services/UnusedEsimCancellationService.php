@@ -122,9 +122,37 @@ class UnusedEsimCancellationService
                 // permanent revoke with 200002. Do not issue a second live profile
                 // while the old one can still carry data: suspend it, then require a
                 // fresh provider confirmation of SUSPENDED/DISABLED and exactly zero
-                // usage before replacement provisioning may continue.
+                // usage before replacement provisioning may continue. A small subset
+                // of one-time profiles rejects both revoke and suspend with 200002.
+                // When that happens, re-query once more and locally supersede the old
+                // profile only while the provider still reports exactly zero usage,
+                // IN_USE/SUSPENDED/USED_UP, and no supported SM-DP lifecycle. This
+                // prevents future top-ups and lets support issue the customer-approved
+                // replacement without weakening the positive/unknown-usage guards.
                 if ($this->canUseSuspensionFallback($confirmed)) {
                     $suspendResponse = $this->provider->suspendEsimByTransaction($esimTranNo, $account);
+
+                    if ($this->statusDoesNotSupportAction($suspendResponse)) {
+                        $superseded = $this->firstProviderEsim($this->provider->queryOrder($externalOrderId, $account));
+                        if ($this->canUseSuspensionFallback($superseded)) {
+                            Log::warning('Provider refused revoke and suspend for a zero-use one-time eSIM; superseding locally for replacement.', [
+                                'external_order_id' => $externalOrderId,
+                                'provider_account' => $account,
+                                'esim_status' => $this->normalizedStatus($superseded['esimStatus'] ?? null),
+                                'smdp_status' => $this->normalizedStatus($superseded['smdpStatus'] ?? null),
+                                'used_bytes' => $this->usedBytes($superseded),
+                            ]);
+                            $this->markRetired($simcard, $superseded);
+
+                            return [
+                                'status' => 'superseded',
+                                'retirement_action' => 'local_supersede_after_provider_actions_unavailable',
+                                'provider_retired' => false,
+                                'provider' => $this->safeProviderStatus($superseded),
+                            ];
+                        }
+                    }
+
                     $this->assertProviderAcceptedRetirement($suspendResponse, 'suspend');
 
                     $suspended = $this->waitForProviderSuspension($externalOrderId, $account);
