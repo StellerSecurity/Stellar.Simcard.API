@@ -46,7 +46,7 @@ beforeEach(function (): void {
     ]);
 });
 
-it('revokes a deleted installed profile with exactly zero usage before replacement', function (): void {
+it('revokes an active installed profile with exactly zero usage before replacement', function (): void {
     $planId = '4538034324401446';
     $crypto = app(EsimCryptoService::class);
     $simcard = supportRetirementSimcard($planId, $crypto);
@@ -55,7 +55,7 @@ it('revokes a deleted installed profile with exactly zero usage before replaceme
     $provider->shouldReceive('queryOrder')
         ->once()
         ->with('B26091323430015', 'primary')
-        ->andReturn(supportRetirementProfile('DELETED', 'IN_USE', 0));
+        ->andReturn(supportRetirementProfile('ENABLED', 'IN_USE', 0));
     $provider->shouldReceive('revokeEsim')
         ->once()
         ->with('26091323430015', 'primary')
@@ -77,6 +77,30 @@ it('revokes a deleted installed profile with exactly zero usage before replaceme
         ->and($simcard->fresh()->state)->toBe('cancelled')
         ->and($simcard->fresh()->esim_status)->toBe('REVOKED')
         ->and((int) $simcard->fresh()->remaining_volume)->toBe(0);
+});
+
+it('continues replacement without revoke when the fresh zero-usage profile is already deleted', function (): void {
+    $planId = '4538034324401446';
+    $crypto = app(EsimCryptoService::class);
+    $simcard = supportRetirementSimcard($planId, $crypto);
+
+    $provider = Mockery::mock(EsimProvider::class);
+    $provider->shouldReceive('queryOrder')
+        ->once()
+        ->with('B26091323430015', 'primary')
+        ->andReturn(supportRetirementProfile('DELETED', 'IN_USE', 0));
+    $provider->shouldReceive('revokeEsim')->never();
+    $provider->shouldReceive('cancelEsim')->never();
+
+    $result = (new UnusedEsimCancellationService($provider, $crypto))
+        ->retireForReplacement($planId);
+
+    expect($result)->toMatchArray([
+        'status' => 'already_deleted',
+        'retirement_action' => 'provider_profile_already_deleted',
+    ])->and($simcard->fresh()->state)->toBe('cancelled')
+        ->and($simcard->fresh()->smdp_status)->toBe('DELETED')
+        ->and((int) $simcard->fresh()->order_usage)->toBe(0);
 });
 
 it('keeps the ordinary cancellation path from silently revoking installed profiles', function (): void {
@@ -102,14 +126,18 @@ it('continues replacement when revoke confirms the zero-usage profile is already
 
     $provider = Mockery::mock(EsimProvider::class);
     $provider->shouldReceive('queryOrder')
-        ->twice()
+        ->once()
         ->with('B26091323430015', 'primary')
-        ->andReturn(supportRetirementProfile('DELETED', 'IN_USE', 0));
+        ->andReturn(supportRetirementProfile('ENABLED', 'IN_USE', 0));
     $provider->shouldReceive('revokeEsim')
         ->once()
         ->with('26091323430015', 'primary')
         // Provider business errors do not consistently include success=false.
         ->andReturn(['errorCode' => '200002']);
+    $provider->shouldReceive('queryOrder')
+        ->once()
+        ->with('B26091323430015', 'primary')
+        ->andReturn(supportRetirementProfile('DELETED', 'IN_USE', 0));
     $provider->shouldReceive('cancelEsim')->never();
 
     $result = (new UnusedEsimCancellationService($provider, $crypto))
@@ -131,7 +159,7 @@ it('does not bypass a revoke rejection when the fresh profile is not deleted', f
     $provider = Mockery::mock(EsimProvider::class);
     $provider->shouldReceive('queryOrder')
         ->once()
-        ->andReturn(supportRetirementProfile('DELETED', 'IN_USE', 0));
+        ->andReturn(supportRetirementProfile('ENABLED', 'IN_USE', 0));
     $provider->shouldReceive('revokeEsim')
         ->once()
         ->andReturn(['success' => false, 'errorCode' => '200002']);
