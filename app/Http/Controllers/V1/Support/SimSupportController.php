@@ -4,6 +4,7 @@ namespace App\Http\Controllers\V1\Support;
 
 use App\Http\Controllers\Controller;
 use App\Services\Support\EsimSupportReplacementService;
+use DomainException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use RuntimeException;
@@ -49,11 +50,39 @@ class SimSupportController extends Controller
                 (string) $data['idempotency_key'],
             );
             return response()->json(['response_code' => 200, 'data' => $result]);
-        } catch (RuntimeException $e) {
+        } catch (RuntimeException|DomainException $e) {
             return $this->runtimeError($e);
         } catch (Throwable $e) {
             report($e);
             return response()->json(['response_code' => 500, 'response_message' => 'Support eSIM replacement failed.'], 500);
+        }
+    }
+
+    public function replacementStatus(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'plan_id' => ['required', 'string', 'max:64'],
+            'customer_email' => ['required', 'email', 'max:254'],
+            'idempotency_key' => ['required', 'string', 'max:191'],
+        ]);
+
+        try {
+            $result = $this->support->replacementStatus(
+                (string) $data['plan_id'],
+                (string) $data['customer_email'],
+                (string) $data['idempotency_key'],
+            );
+            if ($result === null) {
+                return response()->json(['response_code' => 404, 'response_message' => 'Support replacement was not found.'], 404);
+            }
+
+            return response()->json(['response_code' => 200, 'data' => $result]);
+        } catch (RuntimeException|DomainException $e) {
+            return $this->runtimeError($e);
+        } catch (Throwable $e) {
+            report($e);
+
+            return response()->json(['response_code' => 500, 'response_message' => 'Support replacement status lookup failed.'], 500);
         }
     }
 
@@ -79,11 +108,11 @@ class SimSupportController extends Controller
         }
     }
 
-    private function runtimeError(RuntimeException $e): JsonResponse
+    private function runtimeError(Throwable $e): JsonResponse
     {
         $status = (int) $e->getCode();
         if ($status < 400 || $status > 599) {
-            $status = 500;
+            $status = $e instanceof DomainException ? 409 : 500;
         }
         return response()->json(['response_code' => $status, 'response_message' => $e->getMessage()], $status);
     }

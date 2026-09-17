@@ -89,6 +89,43 @@ class EsimSupportReplacementService
         return $this->detailedInspection($simcard, $query, false, 'provider_case_executor');
     }
 
+    /** @return array<string,mixed>|null */
+    public function replacementStatus(string $planId, string $customerEmail, string $idempotencyKey): ?array
+    {
+        $planId = $this->normalizePlanId($planId);
+        $email = $this->normalizeEmail($customerEmail);
+        $idempotencyKey = trim($idempotencyKey);
+        if ($idempotencyKey === '' || strlen($idempotencyKey) > 191) {
+            throw new RuntimeException('A valid support replacement idempotency key is required.', 422);
+        }
+
+        $old = $this->simcards->findByPlanId($planId);
+        if ($old === null) {
+            return null;
+        }
+        $this->assertOwnership($old, $email);
+
+        $replacement = SimcardSupportReplacement::query()
+            ->where('old_simcard_id', $old->id)
+            ->where('idempotency_key', $idempotencyKey)
+            ->first();
+        if ($replacement === null) {
+            return null;
+        }
+
+        return [
+            'found' => true,
+            'status' => (string) $replacement->status,
+            'old_retired' => $replacement->cancelled_old_at !== null,
+            'new_esim_created' => $replacement->new_simcard_id !== null,
+            'last_error' => $replacement->last_error !== null
+                ? mb_substr((string) $replacement->last_error, 0, 1000)
+                : null,
+            'completed_at' => $replacement->completed_at?->toIso8601String(),
+            'updated_at' => $replacement->updated_at?->toIso8601String(),
+        ];
+    }
+
     /** @return array<string,mixed> */
     private function detailedInspection(Simcard $simcard, array $query, bool $emailMatch, string $identityMode): array
     {

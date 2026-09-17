@@ -89,4 +89,5 @@ Route::prefix('v1/support/sim')
         Route::post('/inspect', [SimSupportController::class, 'inspect']);
         Route::post('/inspect-provider-case', [SimSupportController::class, 'inspectProviderCase']);
         Route::post('/replace-unused', [SimSupportController::class, 'replaceUnused']);
+        Route::post('/replacement-status', [SimSupportController::class, 'replacementStatus']);
     });
