@@ -33,6 +33,9 @@ interface EsimProvider
     /** Cancel an unused, uninstalled profile and request the provider refund. */
     public function cancelEsim(string $esimTranNo, string $account = 'primary'): array;
 
+    /** Permanently disable an installed profile without requesting a provider refund. */
+    public function revokeEsim(string $esimTranNo, string $account = 'primary'): array;
+
     /** Suspend data service for an allocated eSIM profile. */
     public function suspendEsim(string $iccid, string $account = 'primary'): array;
 

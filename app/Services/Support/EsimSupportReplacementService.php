@@ -177,7 +177,10 @@ class EsimSupportReplacementService
                     if (! is_numeric($used) || (int) $used !== 0) {
                         throw new RuntimeException('Replacement blocked because live provider usage is not exactly 0 bytes.', 409);
                     }
-                    $this->cancellations->cancel($planId);
+                    // An uninstalled profile can be cancelled for provider credit.
+                    // Once installed, eSIMAccess requires a permanent revoke instead.
+                    // Both paths are guarded by a second live zero-usage check.
+                    $this->cancellations->retireForReplacement($planId);
                     $replacement->forceFill(['status' => 'old_cancelled', 'cancelled_old_at' => now(), 'last_error' => null])->save();
                 }
 

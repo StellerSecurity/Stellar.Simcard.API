@@ -83,11 +83,14 @@ stages:
           tests/Unit/EsimAutoTopupManagementPricingTest.php \
           tests/Unit/TopupProviderCompatibilityTest.php \
           tests/Unit/AutoTopupPaymentRecoverySecurityTest.php \
+          tests/Unit/EsimaccessUnlimitedOrderTest.php \
+          tests/Unit/UnusedEsimCancellationEligibilityTest.php \
           tests/Feature/AutoTopupPaymentRecoveryEndpointTest.php \
           tests/Feature/AutoTopupPaymentRecoveryStateTest.php \
+          tests/Feature/SupportReplacementRetirementTest.php \
           tests/Feature/WholesaleSupportInspectionTest.php
       workingDirectory: $(rootFolder)
-      displayName: 'Verify migrations and Auto Top-Up recovery flows'
+      displayName: 'Verify migrations, Auto Top-Up and support replacement flows'
 
     - task: ArchiveFiles@2
       displayName: 'Archive files'
