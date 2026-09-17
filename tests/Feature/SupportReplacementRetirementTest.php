@@ -103,6 +103,47 @@ it('continues replacement without revoke when the fresh zero-usage profile is al
         ->and((int) $simcard->fresh()->order_usage)->toBe(0);
 });
 
+it('continues replacement when live SM-DP status becomes unsupported after a persisted deletion', function (): void {
+    $planId = '4538034324401446';
+    $crypto = app(EsimCryptoService::class);
+    $simcard = supportRetirementSimcard($planId, $crypto);
+
+    $provider = Mockery::mock(EsimProvider::class);
+    $provider->shouldReceive('queryOrder')
+        ->once()
+        ->andReturn(supportRetirementProfile('NOT_SUPPORTED', 'IN_USE', 0));
+    $provider->shouldReceive('revokeEsim')->never();
+    $provider->shouldReceive('cancelEsim')->never();
+
+    $result = (new UnusedEsimCancellationService($provider, $crypto))
+        ->retireForReplacement($planId);
+
+    expect($result)->toMatchArray([
+        'status' => 'already_deleted',
+        'retirement_action' => 'provider_profile_already_deleted',
+    ])->and($simcard->fresh()->state)->toBe('cancelled')
+        ->and((int) $simcard->fresh()->order_usage)->toBe(0);
+});
+
+it('does not trust an unsupported live SM-DP status without a persisted deletion', function (): void {
+    $planId = '4538034324401446';
+    $crypto = app(EsimCryptoService::class);
+    $simcard = supportRetirementSimcard($planId, $crypto);
+    $simcard->forceFill(['smdp_status' => 'ENABLED'])->save();
+
+    $provider = Mockery::mock(EsimProvider::class);
+    $provider->shouldReceive('queryOrder')
+        ->twice()
+        ->andReturn(supportRetirementProfile('NOT_SUPPORTED', 'IN_USE', 0));
+    $provider->shouldReceive('revokeEsim')
+        ->once()
+        ->andReturn(['errorCode' => '200002']);
+    $provider->shouldReceive('cancelEsim')->never();
+
+    expect(fn () => (new UnusedEsimCancellationService($provider, $crypto))->retireForReplacement($planId))
+        ->toThrow(DomainException::class, 'no longer eligible for revoke');
+});
+
 it('keeps the ordinary cancellation path from silently revoking installed profiles', function (): void {
     $planId = '4538034324401446';
     $crypto = app(EsimCryptoService::class);
