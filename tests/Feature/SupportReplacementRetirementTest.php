@@ -95,6 +95,54 @@ it('keeps the ordinary cancellation path from silently revoking installed profil
         ->toThrow(DomainException::class, 'installed and cannot be cancelled automatically');
 });
 
+it('continues replacement when revoke confirms the zero-usage profile is already deleted', function (): void {
+    $planId = '4538034324401446';
+    $crypto = app(EsimCryptoService::class);
+    $simcard = supportRetirementSimcard($planId, $crypto);
+
+    $provider = Mockery::mock(EsimProvider::class);
+    $provider->shouldReceive('queryOrder')
+        ->twice()
+        ->with('B26091323430015', 'primary')
+        ->andReturn(supportRetirementProfile('DELETED', 'IN_USE', 0));
+    $provider->shouldReceive('revokeEsim')
+        ->once()
+        ->with('26091323430015', 'primary')
+        ->andReturn(['success' => false, 'errorCode' => '200002']);
+    $provider->shouldReceive('cancelEsim')->never();
+
+    $result = (new UnusedEsimCancellationService($provider, $crypto))
+        ->retireForReplacement($planId);
+
+    expect($result)->toMatchArray([
+        'status' => 'already_deleted',
+        'retirement_action' => 'revoke_unavailable_profile_deleted',
+    ])->and($simcard->fresh()->state)->toBe('cancelled')
+        ->and($simcard->fresh()->smdp_status)->toBe('DELETED')
+        ->and((int) $simcard->fresh()->order_usage)->toBe(0);
+});
+
+it('does not bypass a revoke rejection when the fresh profile is not deleted', function (): void {
+    $planId = '4538034324401446';
+    $crypto = app(EsimCryptoService::class);
+    supportRetirementSimcard($planId, $crypto);
+
+    $provider = Mockery::mock(EsimProvider::class);
+    $provider->shouldReceive('queryOrder')
+        ->once()
+        ->andReturn(supportRetirementProfile('DELETED', 'IN_USE', 0));
+    $provider->shouldReceive('revokeEsim')
+        ->once()
+        ->andReturn(['success' => false, 'errorCode' => '200002']);
+    $provider->shouldReceive('queryOrder')
+        ->once()
+        ->andReturn(supportRetirementProfile('ENABLED', 'IN_USE', 0));
+    $provider->shouldReceive('cancelEsim')->never();
+
+    expect(fn () => (new UnusedEsimCancellationService($provider, $crypto))->retireForReplacement($planId))
+        ->toThrow(DomainException::class, 'no longer eligible for revoke');
+});
+
 it('blocks replacement retirement when live provider usage is positive', function (): void {
     $planId = '4538034324401446';
     $crypto = app(EsimCryptoService::class);

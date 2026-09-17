@@ -28,6 +28,7 @@ $assert(! str_contains($service, "'stripe_payment_intent_id' =>"), 'Support SIM 
 $assert(str_contains($service, 'commerceOrderId: null'), 'Replacement must not reuse the original Commerce uniqueness tuple.');
 $assert(str_contains($service, 'retireForReplacement($planId)'), 'Replacement must use the guarded cancel-or-revoke retirement flow.');
 $assert(str_contains($cancellations, "return 'revoke';"), 'Installed zero-usage profiles must select revoke for replacement.');
+$assert(str_contains($cancellations, "'revoke_unavailable_profile_deleted'"), 'A provider-confirmed deleted zero-usage profile must remain replaceable after revoke returns 200002.');
 $assert(str_contains($provider, "'/v1/open/esim/revoke'"), 'The provider client must expose the eSIMAccess revoke endpoint.');
 $assert(str_contains($routes, "Route::prefix('v1/support/sim')"), 'Support routes must remain under the guarded support prefix.');
 
