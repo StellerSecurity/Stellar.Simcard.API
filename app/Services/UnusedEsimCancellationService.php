@@ -17,6 +17,8 @@ class UnusedEsimCancellationService
     private const CANCELLABLE_ESIM_STATUS = 'GOT_RESOURCE';
     private const CANCELLABLE_SMDP_STATUS = 'RELEASED';
     private const CANCELLED_STATUSES = ['CANCEL', 'CANCELED', 'CANCELLED'];
+    private const REVOKED_STATUSES = ['REVOKE', 'REVOKED'];
+    private const REVOCABLE_ESIM_STATUSES = ['GOT_RESOURCE', 'IN_USE', 'SUSPENDED', 'USED_UP'];
     private const TRANSITIONAL_ESIM_STATUSES = ['', 'CREATE', 'PAYING', 'PAID', 'GETTING_RESOURCE'];
     private const PROVIDER_STATUS_ATTEMPTS = 4;
     private const PROVIDER_STATUS_DELAY_MICROSECONDS = 500_000;
@@ -28,10 +30,26 @@ class UnusedEsimCancellationService
 
     public function cancel(string $planId): ?array
     {
+        return $this->retire($planId, false);
+    }
+
+    /**
+     * Retire a verified zero-usage eSIM before support provisions its replacement.
+     * Fresh profiles use cancel (and may receive a provider credit); installed
+     * profiles use revoke because eSIMAccess cannot cancel an installed profile.
+     */
+    public function retireForReplacement(string $planId): ?array
+    {
+        return $this->retire($planId, true);
+    }
+
+    /** @return array<string,mixed>|null */
+    private function retire(string $planId, bool $forReplacement): ?array
+    {
         $planId = preg_replace('/\s+/', '', $planId) ?? $planId;
         $planHash = $this->crypto->derivePlanHash($planId);
 
-        return Cache::lock('simcard-unused-cancel:'.$planHash, 60)->block(8, function () use ($planId, $planHash): ?array {
+        return Cache::lock('simcard-unused-cancel:'.$planHash, 60)->block(8, function () use ($planId, $planHash, $forReplacement): ?array {
             $simcard = Simcard::query()->where('plan_id_hash', $planHash)->first();
 
             if ($simcard === null) {
@@ -47,35 +65,41 @@ class UnusedEsimCancellationService
             $account = $this->preferredProviderAccount($simcard);
             $before = $this->waitForProviderProfile($externalOrderId, $account);
 
-            if ($this->isCancelled($before)) {
-                $this->markCancelled($simcard, $before);
+            if ($this->isRetired($before)) {
+                $this->markRetired($simcard, $before);
 
                 return [
-                    'status' => 'already_cancelled',
+                    'status' => $this->isRevoked($before) ? 'already_revoked' : 'already_cancelled',
                     'provider' => $this->safeProviderStatus($before),
                 ];
             }
 
-            $this->assertProviderStateCancellable($before);
+            $retirementAction = $forReplacement
+                ? $this->replacementRetirementAction($before)
+                : $this->publicCancellationAction($before);
 
             $esimTranNo = trim((string) ($before['esimTranNo'] ?? ''));
             if ($esimTranNo === '') {
-                throw new RuntimeException('The provider did not return the eSIM transaction number required for cancellation.');
+                throw new RuntimeException('The provider did not return the eSIM transaction number required to retire this profile.');
             }
 
-            $cancelResponse = $this->provider->cancelEsim($esimTranNo, $account);
-            $this->assertProviderAcceptedCancellation($cancelResponse);
+            $providerResponse = $retirementAction === 'revoke'
+                ? $this->provider->revokeEsim($esimTranNo, $account)
+                : $this->provider->cancelEsim($esimTranNo, $account);
+            $this->assertProviderAcceptedRetirement($providerResponse, $retirementAction);
 
-            $after = $this->waitForProviderCancellation($externalOrderId, $account);
-            $this->markCancelled($simcard, $after);
+            $after = $this->waitForProviderRetirement($externalOrderId, $account, $retirementAction);
+            $this->markRetired($simcard, $after);
 
             return [
-                'status' => 'cancelled',
+                'status' => $retirementAction === 'revoke' ? 'revoked' : 'cancelled',
+                'retirement_action' => $retirementAction,
                 'provider' => [
                     'esim_status' => $this->normalizedStatus($before['esimStatus'] ?? null),
                     'smdp_status' => $this->normalizedStatus($before['smdpStatus'] ?? null),
                     'used_bytes' => $this->usedBytes($before),
-                    'cancelled_status' => $this->cancelledStatus($after),
+                    'cancelled_status' => $this->retiredStatus($after),
+                    'retired_status' => $this->retiredStatus($after),
                 ],
             ];
         });
@@ -99,13 +123,13 @@ class UnusedEsimCancellationService
             if ($esim !== []) {
                 $last = $esim;
 
-                if ($this->isCancelled($esim)) {
+                if ($this->isRetired($esim)) {
                     return $esim;
                 }
 
                 $classification = $this->providerEligibility($esim);
 
-                if ($classification === 'cancellable' || $classification === 'blocked') {
+                if ($classification !== 'transitional') {
                     return $esim;
                 }
             }
@@ -132,13 +156,13 @@ class UnusedEsimCancellationService
         throw new RuntimeException('The provider did not return an eSIM profile for this order yet.');
     }
 
-    private function waitForProviderCancellation(string $externalOrderId, string $account): array
+    private function waitForProviderRetirement(string $externalOrderId, string $account, string $action): array
     {
         for ($attempt = 1; $attempt <= self::PROVIDER_STATUS_ATTEMPTS; $attempt++) {
             $response = $this->provider->queryOrder($externalOrderId, $account);
             $esim = $this->firstProviderEsim($response);
 
-            if ($esim !== [] && $this->isCancelled($esim)) {
+            if ($esim !== [] && $this->isRetired($esim)) {
                 return $esim;
             }
 
@@ -147,26 +171,59 @@ class UnusedEsimCancellationService
             }
         }
 
-        throw new RuntimeException('The provider has not confirmed the cancelled status yet.');
+        throw new RuntimeException(
+            'The provider has not confirmed the '.($action === 'revoke' ? 'revoked' : 'cancelled').' status yet.'
+        );
     }
 
-    private function assertProviderStateCancellable(array $esim): void
+    private function publicCancellationAction(array $esim): string
     {
         $classification = $this->providerEligibility($esim);
 
-        if ($classification === 'cancellable') {
-            return;
+        if ($classification === 'cancel') {
+            return 'cancel';
         }
 
         if ($classification === 'transitional') {
             throw new RuntimeException('The eSIM is still being prepared by the provider. Please try the cancellation again shortly.');
         }
 
+        if ($classification === 'revoke') {
+            throw new \DomainException('The eSIM is installed and cannot be cancelled automatically.');
+        }
+
+        $this->throwUsageOrLifecycleError($esim, 'cancellation');
+    }
+
+    private function replacementRetirementAction(array $esim): string
+    {
+        $usage = $this->usedBytes($esim);
+        if ($usage === null) {
+            throw new RuntimeException('Replacement blocked because live provider usage is unknown.');
+        }
+        if ($usage > 0) {
+            throw new \DomainException('Replacement blocked because the provider reports data usage on this eSIM.');
+        }
+
+        $classification = $this->providerEligibility($esim);
+        if ($classification === 'cancel' || $classification === 'revoke') {
+            return $classification;
+        }
+        if ($classification === 'transitional') {
+            throw new RuntimeException('The eSIM is still being prepared by the provider. Please try the replacement again shortly.');
+        }
+
+        $this->throwUsageOrLifecycleError($esim, 'replacement');
+    }
+
+    private function throwUsageOrLifecycleError(array $esim, string $operation): never
+    {
         $esimStatus = $this->normalizedStatus($esim['esimStatus'] ?? null);
         $smdpStatus = $this->normalizedStatus($esim['smdpStatus'] ?? null);
         $usage = $this->usedBytes($esim);
 
-        Log::info('eSIM cancellation rejected by provider state.', [
+        Log::info('eSIM retirement rejected by provider state.', [
+            'operation' => $operation,
             'esim_status' => $esimStatus,
             'smdp_status' => $smdpStatus,
             'used_bytes' => $usage,
@@ -179,7 +236,7 @@ class UnusedEsimCancellationService
         }
 
         throw new \DomainException(
-            'The provider reports that this eSIM is not eligible for cancellation. Current status: '
+            'The provider reports that this eSIM is not eligible for '.$operation.'. Current status: '
             .($smdpStatus !== '' ? $smdpStatus : 'UNKNOWN')
             .' / '
             .($esimStatus !== '' ? $esimStatus : 'UNKNOWN')
@@ -193,33 +250,36 @@ class UnusedEsimCancellationService
         $smdpStatus = $this->normalizedStatus($esim['smdpStatus'] ?? null);
         $usage = $this->usedBytes($esim);
 
-        if ($this->isCancelled($esim)) {
-            return 'cancellable';
+        if ($this->isRetired($esim)) {
+            return 'retired';
         }
 
-        // Business rule: usage is the decisive eligibility signal. A profile may be
-        // installed, activated, have an EID, or report IN_USE and is still eligible when
-        // the provider reports exactly 0 bytes consumed. The provider cancel endpoint
-        // remains the final authority before any refund is issued.
-        if ($usage !== null) {
-            return $usage > 0 ? 'blocked' : 'cancellable';
+        if ($usage !== null && $usage > 0) {
+            return 'blocked';
         }
 
-        // Fresh uninstalled profiles may temporarily omit orderUsage. Preserve the
-        // RELEASED + GOT_RESOURCE path and let the provider cancel endpoint decide.
         if (
             $esimStatus === self::CANCELLABLE_ESIM_STATUS
             && $smdpStatus === self::CANCELLABLE_SMDP_STATUS
         ) {
-            return 'cancellable';
+            return 'cancel';
         }
 
-        // Usage is not available yet. Do not infer that installation means usage; retry
-        // until the provider exposes usage, then 0 bytes is eligible and >0 is blocked.
+        // eSIMAccess cannot cancel an installed profile, even when it has consumed
+        // exactly 0 bytes. Support replacements permanently revoke that old profile
+        // before provisioning the same purchased plan again.
+        if ($usage === 0 && in_array($esimStatus, self::REVOCABLE_ESIM_STATUSES, true)) {
+            return 'revoke';
+        }
+
+        if (in_array($esimStatus, self::TRANSITIONAL_ESIM_STATUSES, true)) {
+            return 'transitional';
+        }
+
         return 'transitional';
     }
 
-    private function assertProviderAcceptedCancellation(array $response): void
+    private function assertProviderAcceptedRetirement(array $response, string $action): void
     {
         $success = data_get($response, 'success');
         $errorCode = trim((string) (data_get($response, 'errorCode') ?? data_get($response, 'code') ?? ''));
@@ -230,14 +290,14 @@ class UnusedEsimCancellationService
 
         if ($successIsFalse || ($errorCode !== '' && ! in_array($errorCode, ['0', '000000'], true))) {
             if (in_array($errorCode, ['200002', '200009', '200010'], true)) {
-                throw new \DomainException('The provider reports that this eSIM is no longer eligible for cancellation.');
+                throw new \DomainException('The provider reports that this eSIM is no longer eligible for '.$action.'.');
             }
 
-            throw new RuntimeException('The provider rejected the cancellation request.');
+            throw new RuntimeException('The provider rejected the '.$action.' request.');
         }
     }
 
-    private function markCancelled(Simcard $simcard, array $provider): void
+    private function markRetired(Simcard $simcard, array $provider): void
     {
         DB::transaction(function () use ($simcard, $provider): void {
             $locked = Simcard::query()
@@ -305,10 +365,21 @@ class UnusedEsimCancellationService
             || in_array($this->normalizedStatus($esim['smdpStatus'] ?? null), self::CANCELLED_STATUSES, true);
     }
 
-    private function cancelledStatus(array $esim): string
+    private function isRevoked(array $esim): bool
+    {
+        return in_array($this->normalizedStatus($esim['esimStatus'] ?? null), self::REVOKED_STATUSES, true)
+            || in_array($this->normalizedStatus($esim['smdpStatus'] ?? null), self::REVOKED_STATUSES, true);
+    }
+
+    private function isRetired(array $esim): bool
+    {
+        return $this->isCancelled($esim) || $this->isRevoked($esim);
+    }
+
+    private function retiredStatus(array $esim): string
     {
         $esimStatus = $this->normalizedStatus($esim['esimStatus'] ?? null);
-        if (in_array($esimStatus, self::CANCELLED_STATUSES, true)) {
+        if (in_array($esimStatus, [...self::CANCELLED_STATUSES, ...self::REVOKED_STATUSES], true)) {
             return $esimStatus;
         }
 
@@ -321,7 +392,8 @@ class UnusedEsimCancellationService
             'esim_status' => $this->normalizedStatus($esim['esimStatus'] ?? null),
             'smdp_status' => $this->normalizedStatus($esim['smdpStatus'] ?? null),
             'used_bytes' => $this->usedBytes($esim),
-            'cancelled_status' => $this->cancelledStatus($esim),
+            'cancelled_status' => $this->retiredStatus($esim),
+            'retired_status' => $this->retiredStatus($esim),
         ];
     }
 

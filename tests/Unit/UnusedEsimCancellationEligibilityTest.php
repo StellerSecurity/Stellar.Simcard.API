@@ -19,13 +19,13 @@ function cancellationEligibility(array $providerEsim): string
     return $method->invoke($service, $providerEsim);
 }
 
-it('allows the documented fresh provider state when order usage is omitted', function (): void {
+it('uses cancellation for the documented fresh provider state', function (): void {
     expect(cancellationEligibility([
         'smdpStatus' => 'RELEASED',
         'esimStatus' => 'GOT_RESOURCE',
         'activateTime' => null,
         'eid' => '',
-    ]))->toBe('cancellable');
+    ]))->toBe('cancel');
 });
 
 it('treats provider allocation states as retryable instead of installed or used', function (): void {
@@ -48,14 +48,24 @@ it('blocks cancellation when provider usage is positive', function (): void {
     ]))->toBe('blocked');
 });
 
-it('allows an installed in-use profile when provider usage is exactly zero', function (): void {
+it('uses revoke for an installed in-use profile when provider usage is exactly zero', function (): void {
     expect(cancellationEligibility([
         'smdpStatus' => 'ENABLED',
         'esimStatus' => 'IN_USE',
         'orderUsage' => 0,
         'activateTime' => '2026-08-19T10:00:00Z',
         'eid' => '89049032000000000000000000000001',
-    ]))->toBe('cancellable');
+    ]))->toBe('revoke');
+});
+
+it('uses revoke for a deleted zero-usage profile that remains active at the provider', function (): void {
+    expect(cancellationEligibility([
+        'smdpStatus' => 'DELETED',
+        'esimStatus' => 'IN_USE',
+        'orderUsage' => 0,
+        'activateTime' => '2026-08-19T10:00:00Z',
+        'eid' => '89049032000000000000000000000001',
+    ]))->toBe('revoke');
 });
 
 it('treats installed profiles with unknown usage as retryable', function (): void {

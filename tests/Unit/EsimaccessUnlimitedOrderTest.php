@@ -114,3 +114,20 @@ it('supports additive slug and dataType filters for Daily Unlimited catalogue qu
             && ($payload['dataType'] ?? null) === 2;
     });
 });
+
+it('revokes an installed profile by eSIM transaction number', function (): void {
+    Http::fake([
+        'https://provider.test/v1/open/esim/revoke' => Http::response([
+            'success' => true,
+            'errorCode' => '0',
+        ], 200),
+    ]);
+
+    $result = unlimitedOrderProvider()->revokeEsim('26091323430015');
+
+    expect($result['success'] ?? null)->toBeTrue();
+    Http::assertSent(function (Request $request): bool {
+        return $request->url() === 'https://provider.test/v1/open/esim/revoke'
+            && $request->data() === ['esimTranNo' => '26091323430015'];
+    });
+});

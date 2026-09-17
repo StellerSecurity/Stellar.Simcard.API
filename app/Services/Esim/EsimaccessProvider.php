@@ -241,6 +241,27 @@ class EsimaccessProvider implements EsimProvider
         throw new RuntimeException('The eSIMAccess cancellation response was not valid JSON.');
     }
 
+    public function revokeEsim(string $esimTranNo, string $account = self::ACCOUNT_PRIMARY): array
+    {
+        $payload = ['esimTranNo' => $esimTranNo];
+
+        $response = $this->http()
+            ->withHeaders($this->createHeaders($payload, $account))
+            ->post($this->baseUrl . '/v1/open/esim/revoke', $payload);
+
+        $body = $response->json();
+
+        // A lifecycle conflict is a valid provider response. Return its structured
+        // body so the guarded replacement service can map it without exposing it.
+        if (is_array($body)) {
+            return $body;
+        }
+
+        $response->throw();
+
+        throw new RuntimeException('The eSIMAccess revoke response was not valid JSON.');
+    }
+
     public function suspendEsim(string $iccid, string $account = self::ACCOUNT_PRIMARY): array
     {
         $payload = ['iccid' => trim($iccid)];
