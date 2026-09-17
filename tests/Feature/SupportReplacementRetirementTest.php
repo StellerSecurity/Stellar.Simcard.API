@@ -125,23 +125,57 @@ it('continues replacement when live SM-DP status becomes unsupported after a per
         ->and((int) $simcard->fresh()->order_usage)->toBe(0);
 });
 
-it('does not trust an unsupported live SM-DP status without a persisted deletion', function (): void {
+it('suspends a zero-usage profile when revoke is unavailable and deletion is not proven', function (): void {
     $planId = '4538034324401446';
     $crypto = app(EsimCryptoService::class);
     $simcard = supportRetirementSimcard($planId, $crypto);
     $simcard->forceFill(['smdp_status' => 'ENABLED'])->save();
 
     $provider = Mockery::mock(EsimProvider::class);
+    $before = supportRetirementProfile('NOT_SUPPORTED', 'IN_USE', 0);
+    $before['obj']['esimList'][0]['iccid'] = '8945000000000000000';
     $provider->shouldReceive('queryOrder')
         ->twice()
-        ->andReturn(supportRetirementProfile('NOT_SUPPORTED', 'IN_USE', 0));
+        ->andReturn($before);
     $provider->shouldReceive('revokeEsim')
         ->once()
         ->andReturn(['errorCode' => '200002']);
+    $provider->shouldReceive('suspendEsim')
+        ->once()
+        ->with('8945000000000000000', 'primary')
+        ->andReturn(['success' => true, 'errorCode' => '0']);
+    $provider->shouldReceive('queryOrder')
+        ->once()
+        ->andReturn(supportRetirementProfile('DISABLED', 'SUSPENDED', 0));
+    $provider->shouldReceive('cancelEsim')->never();
+
+    $result = (new UnusedEsimCancellationService($provider, $crypto))->retireForReplacement($planId);
+
+    expect($result)->toMatchArray([
+        'status' => 'suspended',
+        'retirement_action' => 'suspend_after_revoke_unavailable',
+    ])->and($simcard->fresh()->state)->toBe('cancelled')
+        ->and($simcard->fresh()->esim_status)->toBe('SUSPENDED')
+        ->and($simcard->fresh()->smdp_status)->toBe('DISABLED')
+        ->and((int) $simcard->fresh()->order_usage)->toBe(0);
+});
+
+it('does not provision after a suspension fallback until the provider confirms it', function (): void {
+    $planId = '4538034324401446';
+    $crypto = app(EsimCryptoService::class);
+    supportRetirementSimcard($planId, $crypto)->forceFill(['smdp_status' => 'ENABLED'])->save();
+
+    $before = supportRetirementProfile('NOT_SUPPORTED', 'IN_USE', 0);
+    $before['obj']['esimList'][0]['iccid'] = '8945000000000000000';
+
+    $provider = Mockery::mock(EsimProvider::class);
+    $provider->shouldReceive('queryOrder')->times(6)->andReturn($before);
+    $provider->shouldReceive('revokeEsim')->once()->andReturn(['errorCode' => '200002']);
+    $provider->shouldReceive('suspendEsim')->once()->andReturn(['success' => true, 'errorCode' => '0']);
     $provider->shouldReceive('cancelEsim')->never();
 
     expect(fn () => (new UnusedEsimCancellationService($provider, $crypto))->retireForReplacement($planId))
-        ->toThrow(DomainException::class, 'no longer eligible for revoke');
+        ->toThrow(RuntimeException::class, 'has not confirmed that the old eSIM is suspended');
 });
 
 it('keeps the ordinary cancellation path from silently revoking installed profiles', function (): void {
