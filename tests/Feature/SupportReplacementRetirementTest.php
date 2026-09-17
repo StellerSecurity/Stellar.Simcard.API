@@ -108,7 +108,8 @@ it('continues replacement when revoke confirms the zero-usage profile is already
     $provider->shouldReceive('revokeEsim')
         ->once()
         ->with('26091323430015', 'primary')
-        ->andReturn(['success' => false, 'errorCode' => '200002']);
+        // Provider business errors do not consistently include success=false.
+        ->andReturn(['errorCode' => '200002']);
     $provider->shouldReceive('cancelEsim')->never();
 
     $result = (new UnusedEsimCancellationService($provider, $crypto))

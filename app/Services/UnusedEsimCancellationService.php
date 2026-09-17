@@ -317,13 +317,13 @@ class UnusedEsimCancellationService
 
     private function statusDoesNotSupportAction(array $response): bool
     {
-        $success = data_get($response, 'success');
         $errorCode = trim((string) (data_get($response, 'errorCode') ?? data_get($response, 'code') ?? ''));
-        $failed = $success === false
-            || (is_string($success) && in_array(strtolower(trim($success)), ['false', '0', 'no'], true))
-            || (is_int($success) && $success === 0);
 
-        return $failed && $errorCode === '200002';
+        // eSIMAccess does not consistently include a top-level success=false
+        // field for business errors. The exact provider code is authoritative;
+        // the caller still performs a fresh DELETED + 0-byte verification before
+        // treating the profile as safely retired.
+        return $errorCode === '200002';
     }
 
     private function isDeletedWithZeroUsage(array $esim): bool
