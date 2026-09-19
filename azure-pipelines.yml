@@ -92,7 +92,9 @@ stages:
           tests/Feature/RetiredEsimTopupSafetyTest.php \
           tests/Feature/RetiredEsimStatePreservationTest.php \
           tests/Unit/ReplacementProviderResponseTest.php \
-          tests/Feature/WholesaleSupportInspectionTest.php
+          tests/Feature/WholesaleSupportInspectionTest.php \
+          tests/Feature/WholesaleSimcardSmsEndpointTest.php \
+          tests/Feature/WholesaleSimcardSmsServiceTest.php
       workingDirectory: $(rootFolder)
       displayName: 'Verify migrations, Auto Top-Up and support replacement flows'
 

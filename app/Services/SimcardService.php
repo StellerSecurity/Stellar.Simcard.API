@@ -827,7 +827,7 @@ class SimcardService
         // The provider can allocate the ICCID shortly after the install payload.
         // Surface this as retryable so Commerce never turns propagation delay into
         // a permanent failed paid order.
-        throw new RuntimeException('Provider ICCID is not ready yet for virtual-plan top-up.', 503);
+        throw new RuntimeException('Provider ICCID is not ready yet.', 503);
     }
 
     /** Fetch install payload with a short retry loop. */
