@@ -8,6 +8,7 @@ use App\Http\Controllers\V1\UnusedEsimCancelController;
 use App\Http\Controllers\V1\Webhooks\EsimaccessWebhookController;
 use App\Http\Middleware\RelayEsimaccessWebhookToWholesale;
 use App\Http\Controllers\V1\Support\SimSupportController;
+use App\Http\Controllers\V1\WholesaleSimcardSmsController;
 
 Route::post('v1/webhooks/esimaccess', EsimaccessWebhookController::class)
     ->middleware(RelayEsimaccessWebhookToWholesale::class);
@@ -61,6 +62,11 @@ Route::prefix('v1/sim')
 
         // POST /api/v1/sim/cancel
         Route::post('/cancel', UnusedEsimCancelController::class)
+            ->middleware('throttle:sim.user.write');
+
+        // Internal reseller relay. The service verifies the complete wholesale
+        // order identity before decrypting ICCID or performing a provider write.
+        Route::post('/sms', WholesaleSimcardSmsController::class)
             ->middleware('throttle:sim.user.write');
 
         // POST /api/v1/sim/user
